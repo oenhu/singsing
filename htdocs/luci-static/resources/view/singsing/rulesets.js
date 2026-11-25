@@ -251,6 +251,14 @@ return view.extend({
 			tableWrap.appendChild(E('table', { 'class': 'table' }, rows));
 		};
 
+		this._saveFn = function() {
+			return api.saveRulesetUrls(JSON.stringify(urlOverrides, null, 2), currentManifestJson()).then(function(res) {
+				if (res && res.ok) ui.addNotification(null, E('p', '规则集下载地址清单已保存'), 'info');
+				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
+				return res;
+			});
+		};
+
 		renderTable();
 
 		return E('div', { 'class': 'cbi-map' }, [
@@ -265,7 +273,15 @@ return view.extend({
 		]);
 	},
 
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
+	handleSave: function() {
+		return this._saveFn ? this._saveFn() : Promise.resolve();
+	},
+
+	handleSaveApply: function() {
+		return this.handleSave().then(function() { return api.applyWithNotify(); });
+	},
+
+	handleReset: function() {
+		window.location.reload();
+	}
 });

@@ -156,6 +156,14 @@ return view.extend({
 				])
 			]));
 		});
+		this._saveFn = function() {
+			return api.saveProfile(activeName, loaded.profile).then(function(res) {
+				if (res && res.ok) ui.addNotification(null, E('p', '当前配置方案「' + activeName + '」已保存'), 'info');
+				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
+				return res;
+			});
+		};
+
 		listWrap.appendChild(E('table', { 'class': 'table' }, rows));
 
 		return E('div', { 'class': 'cbi-map' }, [
@@ -177,7 +185,15 @@ return view.extend({
 		]);
 	},
 
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
+	handleSave: function() {
+		return this._saveFn ? this._saveFn() : Promise.resolve();
+	},
+
+	handleSaveApply: function() {
+		return this.handleSave().then(function() { return api.applyWithNotify(); });
+	},
+
+	handleReset: function() {
+		window.location.reload();
+	}
 });

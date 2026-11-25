@@ -457,6 +457,37 @@ return view.extend({
 			devTableWrap.appendChild(E('table', { 'class': 'table' }, rows));
 		};
 
+		this._saveFn = function() {
+			var dCheck = engine.parseRuleList(directArea.value);
+			var pCheck = engine.parseRuleList(proxyArea.value);
+			var acLines = acClientsArea.value.split('\n').map(function(x) { return x.trim(); }).filter(Boolean);
+			var acParsed = engine.parseClientEntries(acLines);
+			if (dCheck.invalid.length) {
+				notify(false, '直连列表格式有误：' + dCheck.invalid.map(function(x) { return x.entry + '（' + x.reason + '）'; }).join('、'));
+				return Promise.reject(new Error('invalid direct list'));
+			}
+			if (pCheck.invalid.length) {
+				notify(false, '代理列表格式有误：' + pCheck.invalid.map(function(x) { return x.entry + '（' + x.reason + '）'; }).join('、'));
+				return Promise.reject(new Error('invalid proxy list'));
+			}
+			if (acModeSel.value !== 'all' && acParsed.invalid.length) {
+				notify(false, '设备列表格式无效：' + acParsed.invalid.join('、'));
+				return Promise.reject(new Error('invalid access control list'));
+			}
+			profile.settings.directDomains = directArea.value.split('\n').map(function(l) { return l.trim(); }).filter(Boolean);
+			profile.settings.proxyRules = proxyArea.value.split('\n').map(function(l) { return l.trim(); }).filter(Boolean);
+			profile.settings.steam = !!steamChk.checked;
+			profile.settings.blockIcloudQuic = !!icloudChk.checked;
+			ac.mode = acModeSel.value;
+			ac.clients = acLines;
+			return Promise.all([
+				api.saveProfile(profileName, profile),
+				api.saveAccessControl(JSON.stringify(ac, null, 2))
+			]).then(function() {
+				ui.addNotification(null, E('p', '路由分流与客户端访问控制已保存'), 'info');
+			});
+		};
+
 		renderRulesTable();
 		renderDeviceRules();
 
@@ -544,7 +575,15 @@ return view.extend({
 		]);
 	},
 
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
+	handleSave: function() {
+		return this._saveFn ? this._saveFn() : Promise.resolve();
+	},
+
+	handleSaveApply: function() {
+		return this.handleSave().then(function() { return api.applyWithNotify(); });
+	},
+
+	handleReset: function() {
+		window.location.reload();
+	}
 });

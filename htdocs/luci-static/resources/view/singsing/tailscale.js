@@ -29,6 +29,13 @@ return view.extend({
 		var profile = loaded.profile;
 		var engine = loaded.engine;
 		var profileName = loaded.name;
+		this._saveFn = function() {
+			return api.saveProfile(profileName, profile).then(function(res) {
+				if (res && res.ok) ui.addNotification(null, E('p', 'Tailscale 配置已保存'), 'info');
+				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
+				return res;
+			});
+		};
 
 		var statusBar = E('div', { 'style': 'margin-top:10px;' });
 		var tableWrap = E('div', { 'class': 'cbi-section', 'style': 'margin-top:12px;' });
@@ -312,7 +319,15 @@ return view.extend({
 		]);
 	},
 
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
+	handleSave: function() {
+		return this._saveFn ? this._saveFn() : Promise.resolve();
+	},
+
+	handleSaveApply: function() {
+		return this.handleSave().then(function() { return api.applyWithNotify(); });
+	},
+
+	handleReset: function() {
+		window.location.reload();
+	}
 });

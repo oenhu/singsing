@@ -286,6 +286,18 @@ return view.extend({
 			});
 		};
 
+		this._saveFn = function() {
+			uci.set('singsing', 'subscription', 'auto_update', autoUpdChk.checked ? '1' : '0');
+			uci.set('singsing', 'subscription', 'update_interval', intervalSel.value);
+			uci.set('singsing', 'subscription', 'auto_apply', autoApplyChk.checked ? '1' : '0');
+			return uci.save()
+				.then(function() { return uci.apply(); })
+				.then(function() { return api.saveSubscriptions(JSON.stringify(subs, null, 2)); })
+				.then(function() { return api.saveProfile(loaded.name, profile); })
+				.then(function() { return api.syncCron(); })
+				.then(function() { ui.addNotification(null, E('p', '订阅列表与定时设置已保存'), 'info'); });
+		};
+
 		renderTable();
 
 		return E('div', { 'class': 'cbi-map' }, [
@@ -314,7 +326,15 @@ return view.extend({
 		]);
 	},
 
-	handleSaveApply: null,
-	handleSave: null,
-	handleReset: null
+	handleSave: function() {
+		return this._saveFn ? this._saveFn() : Promise.resolve();
+	},
+
+	handleSaveApply: function() {
+		return this.handleSave().then(function() { return api.applyWithNotify(); });
+	},
+
+	handleReset: function() {
+		window.location.reload();
+	}
 });

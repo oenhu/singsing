@@ -1,6 +1,6 @@
 'use strict';
 
-import { readfile, writefile, stat, unlink, popen, lsdir } from 'fs';
+import { readfile, writefile, stat, unlink, popen, lsdir, chmod } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_DIR = '/etc/singsing';
@@ -15,6 +15,13 @@ const TMP_NEW_CONFIG = '/tmp/singsing/config.new.json';
 const SERVICE_MGR = '/usr/share/singsing/service-manager.sh';
 const SUB_UPDATER = '/usr/share/singsing/subscription-updater.uc';
 const INIT_SCRIPT = '/etc/init.d/singsing';
+
+function writeFileSafe(path, data, mode) {
+	let n = writefile(path, data);
+	if (n == null) return false;
+	if (mode != null) chmod(path, mode);
+	return true;
+}
 
 function runCmd(cmd) {
 	let p = popen(cmd + ' 2>&1', 'r');
@@ -187,7 +194,7 @@ const methods = {
 
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 			let path = `${PROFILES_DIR}/${name}.json`;
-			let ok = writefile(path, req.args.profile, 0600);
+			let ok = writeFileSafe(path, req.args.profile, 0600);
 			if (!ok) return { ok: false, error: 'Failed to write profile file' };
 			return { ok: true };
 		}
@@ -221,7 +228,7 @@ const methods = {
 			if (type(req.args.config) != 'string') return { ok: false, error: 'Missing config JSON' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 			let tmpPath = '/tmp/singsing/validate.tmp.json';
-			if (!writefile(tmpPath, req.args.config, 0600))
+			if (!writeFileSafe(tmpPath, req.args.config, 0600))
 				return { ok: false, error: 'Failed to write temporary config' };
 			let res = runCmd(`${SERVICE_MGR} validate_config "${tmpPath}"`);
 			unlink(tmpPath);
@@ -236,11 +243,11 @@ const methods = {
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 
 			if (type(req.args.manifest) == 'string' && length(req.args.manifest) > 0) {
-				if (!writefile(MANIFEST_FILE, req.args.manifest, 0644))
+				if (!writeFileSafe(MANIFEST_FILE, req.args.manifest, 0644))
 					return { ok: false, error: 'Failed to write rule-sets manifest' };
 			}
 
-			if (!writefile(TMP_NEW_CONFIG, req.args.config, 0600))
+			if (!writeFileSafe(TMP_NEW_CONFIG, req.args.config, 0600))
 				return { ok: false, error: 'Failed to write candidate config' };
 
 			let res = runCmd(`${SERVICE_MGR} apply_config`);
@@ -340,10 +347,10 @@ const methods = {
 			if (type(parsed) != 'object')
 				return { ok: false, error: 'Invalid URLs map' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			if (!writefile(RULESET_URLS_FILE, req.args.urls || '{}', 0644))
+			if (!writeFileSafe(RULESET_URLS_FILE, req.args.urls || '{}', 0644))
 				return { ok: false, error: 'Failed to save rule-set URLs' };
 			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
-				writefile(MANIFEST_FILE, req.args.manifest, 0644);
+				writeFileSafe(MANIFEST_FILE, req.args.manifest, 0644);
 			}
 			return { ok: true };
 		}
@@ -357,7 +364,7 @@ const methods = {
 				return { ok: false, error: 'Invalid rule-set tag' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
-				writefile(MANIFEST_FILE, req.args.manifest, 0644);
+				writeFileSafe(MANIFEST_FILE, req.args.manifest, 0644);
 			}
 			let res = runCmd(`${SERVICE_MGR} update_rulesets "${tag}"`);
 			let parsed = json(res.output);
@@ -432,7 +439,7 @@ const methods = {
 			if (type(parsed) != 'array')
 				return { ok: false, error: 'Invalid subscriptions array' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			if (!writefile(SUBS_FILE, req.args.subscriptions || '[]', 0600))
+			if (!writeFileSafe(SUBS_FILE, req.args.subscriptions || '[]', 0600))
 				return { ok: false, error: 'Failed to save subscriptions.json' };
 			runCmd(`${SERVICE_MGR} cron_sync`);
 			return { ok: true };
@@ -506,7 +513,7 @@ const methods = {
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 			let ext = (fmt == 'source') ? 'json' : 'srs';
 			let dest = `${dir}/${tag}.${ext}`;
-			if (!writefile(dest, rawBytes, 0644))
+			if (!writeFileSafe(dest, rawBytes, 0644))
 				return { ok: false, error: '写入规则集文件失败：' + dest };
 
 			return { ok: true, path: dest, size: length(rawBytes) };
@@ -563,7 +570,7 @@ const methods = {
 			if (type(parsed) != 'object')
 				return { ok: false, error: 'Invalid access control JSON' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			if (!writefile(ACCESS_FILE, req.args.data || '{}', 0644))
+			if (!writeFileSafe(ACCESS_FILE, req.args.data || '{}', 0644))
 				return { ok: false, error: 'Failed to write access-control.json' };
 			return { ok: true };
 		}

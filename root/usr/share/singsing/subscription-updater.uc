@@ -4,7 +4,7 @@
 // Zero-dependency OpenWrt background subscription updater for luci-app-singsing.
 // Runs directly on OpenWrt 24.10 & 25.12 built-in ucode (no QuickJS / Node.js / Python / Lua).
 
-import { readfile, writefile, stat, popen } from 'fs';
+import { readfile, writefile, stat, popen, chmod } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_DIR = '/etc/singsing';
@@ -13,6 +13,13 @@ const SUBS_FILE = `${CONF_DIR}/subscriptions.json`;
 const SB_CONFIG = '/etc/sing-box/config.json';
 const TMP_NEW_CONFIG = '/tmp/singsing/config.new.json';
 const SERVICE_MGR = '/usr/share/singsing/service-manager.sh';
+
+function writeFileSafe(path, data, mode) {
+	let n = writefile(path, data);
+	if (n == null) return false;
+	if (mode != null) chmod(path, mode);
+	return true;
+}
 
 function toStr(v) {
 	return (v == null) ? '' : ('' + v);
@@ -469,7 +476,7 @@ function patchRunningConfig(profile) {
 	];
 
 	runCmd(`${SERVICE_MGR} ensure_dirs`);
-	return writefile(TMP_NEW_CONFIG, sprintf('%.2J', cfg), 0600);
+	return writeFileSafe(TMP_NEW_CONFIG, sprintf('%.2J', cfg), 0600);
 }
 
 // --- Main CLI ---
@@ -525,9 +532,9 @@ for (let sub in subs) {
 	push(updated, { id: sub.id, name: sub.name, count: count });
 }
 
-writefile(SUBS_FILE, sprintf('%.2J', subs), 0600);
+writeFileSafe(SUBS_FILE, sprintf('%.2J', subs), 0600);
 if (length(updated) > 0) {
-	writefile(profPath, sprintf('%.2J', profile), 0600);
+	writeFileSafe(profPath, sprintf('%.2J', profile), 0600);
 }
 
 let applied = false, applyError = '';
