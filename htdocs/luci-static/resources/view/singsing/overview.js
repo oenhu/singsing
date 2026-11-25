@@ -1,6 +1,7 @@
 'use strict';
 'require view';
 'require ui';
+'require uci';
 'require poll';
 'require singsing.api as api';
 
@@ -29,10 +30,10 @@ function formatBytes(n) {
 
 function statCard(label, value, color) {
 	return E('div', {
-		'style': 'flex:1 1 175px;padding:12px 14px;border:1px solid #ddd;border-radius:6px;background:#fff;'
+		'style': 'flex:1 1 175px;padding:12px 14px;border:1px solid var(--border-color-medium, rgba(127,127,127,0.25));border-radius:6px;background:var(--background-color-high, rgba(127,127,127,0.05));'
 	}, [
-		E('div', { 'style': 'font-size:12px;color:#666;margin-bottom:4px;' }, label),
-		E('div', { 'style': 'font-size:14px;font-weight:600;color:' + (color || '#222') + ';word-break:break-all;' }, value || '-')
+		E('div', { 'style': 'font-size:12px;opacity:0.75;margin-bottom:4px;' }, label),
+		E('div', { 'style': 'font-size:14px;font-weight:600;' + (color ? ('color:' + color + ';') : '') + 'word-break:break-all;' }, value || '-')
 	]);
 }
 
@@ -59,6 +60,7 @@ return view.extend({
 		var prevTraffic = { ts: 0, up: 0, down: 0 };
 		var liveStats = { mode: null, upSpeed: 0, downSpeed: 0, upTotal: 0, downTotal: 0, connCount: 0, proxies: null };
 		var delays = {};
+		var refreshing = false;
 
 		var gridContainer = E('div', { 'id': 'sb-status-grid' });
 		var msgBox = E('div', { 'id': 'sb-action-msg', 'style': 'margin-top:12px;' });
@@ -66,14 +68,15 @@ return view.extend({
 		var clashPanel = E('div', { 'id': 'sb-clash-panel', 'style': 'margin-top:16px;' });
 
 		var showMsg = function(type, title, detail) {
+			var fg = type === 'error' ? '#991b1b' : (type === 'warning' ? '#92400e' : '#166534');
 			var bg = type === 'error' ? '#fef2f2' : (type === 'warning' ? '#fffbeb' : '#f0fdf4');
 			var border = type === 'error' ? '#fca5a5' : (type === 'warning' ? '#fcd34d' : '#86efac');
 			msgBox.innerHTML = '';
 			msgBox.appendChild(E('div', {
-				'style': 'padding:10px 14px;border-radius:6px;background:' + bg + ';border:1px solid ' + border + ';'
+				'style': 'padding:10px 14px;border-radius:6px;background:' + bg + ';color:' + fg + ';border:1px solid ' + border + ';'
 			}, [
 				E('div', { 'style': 'font-weight:600;margin-bottom:4px;' }, title),
-				detail ? E('pre', { 'style': 'margin:0;white-space:pre-wrap;font-size:12px;' }, detail) : ''
+				detail ? E('pre', { 'style': 'margin:0;white-space:pre-wrap;font-size:12px;color:inherit;background:transparent;' }, detail) : ''
 			]));
 		};
 
@@ -88,14 +91,14 @@ return view.extend({
 			gridContainer.appendChild(E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:10px;margin:12px 0;' }, [
 				statCard('运行状态', curSt.running ? ('运行中 (PID ' + curSt.pid + ')') : '已停止', curSt.running ? '#16a34a' : '#dc2626'),
 				statCard('运行时长', curSt.running ? formatUptime(curSt.uptime) : '-'),
-				statCard('核心版本', curSt.bin_exists ? (curSt.version || curSt.singbox_bin) + (curSt.version_supported === false ? '（需 1.14+）' : '') : ('未找到: ' + curSt.singbox_bin), (curSt.bin_exists && curSt.version_supported !== false) ? '#222' : '#dc2626'),
+				statCard('核心版本', curSt.bin_exists ? (curSt.version || curSt.singbox_bin) + (curSt.version_supported === false ? '（需 1.14+）' : '') : ('未找到: ' + curSt.singbox_bin), (curSt.bin_exists && curSt.version_supported !== false) ? null : '#dc2626'),
 				statCard('当前分流模式', mode),
 				statCard('当前 proxy 出口', curSt.running ? proxyNow : '-'),
 				statCard('实时速率 / 连接', curSt.running ? ('↑ ' + formatBytes(liveStats.upSpeed) + '/s  ↓ ' + formatBytes(liveStats.downSpeed) + '/s (' + liveStats.connCount + ' 连接)') : '-'),
-				statCard('透明代理', curSt.tun_up ? ('TUN 已就绪 (' + curSt.tun_interface + ')') : ('未启动 (' + curSt.tun_interface + ')'), curSt.tun_up ? '#16a34a' : '#666'),
-				statCard('直连上游 DNS', directDns, curSt.local_dns ? '#222' : '#dc2626'),
+				statCard('透明代理', curSt.tun_up ? ('TUN 已就绪 (' + curSt.tun_interface + ')') : ('未启动 (' + curSt.tun_interface + ')'), curSt.tun_up ? '#16a34a' : null),
+				statCard('直连上游 DNS', directDns, curSt.local_dns ? null : '#dc2626'),
 				statCard('代理上游 DNS', remoteLabel),
-				statCard('dnsmasq 接管', curSt.dnsmasq_taken_over ? ('已接管 (127.0.0.1#' + curSt.listen_port + ')') : '未接管', curSt.dnsmasq_taken_over ? '#16a34a' : '#666')
+				statCard('dnsmasq 接管', curSt.dnsmasq_taken_over ? ('已接管 (127.0.0.1#' + curSt.listen_port + ')') : '未接管', curSt.dnsmasq_taken_over ? '#16a34a' : null)
 			]));
 		};
 
@@ -103,7 +106,7 @@ return view.extend({
 			clashPanel.innerHTML = '';
 			if (!curSt.running || !liveStats.proxies) {
 				if (curSt.running) {
-					clashPanel.appendChild(E('div', { 'style': 'font-size:12px;color:#666;' }, 'Clash API 未响应（请确认已在 Profile 中开启 127.0.0.1:9090）。'));
+					clashPanel.appendChild(E('div', { 'style': 'font-size:12px;opacity:0.75;' }, 'Clash API 未响应（请确认已在 Profile 中开启 127.0.0.1:9090）。'));
 				}
 				return;
 			}
@@ -133,9 +136,10 @@ return view.extend({
 				'style': 'margin-left:8px;',
 				'click': function() {
 					if (!liveStats.mode) return;
-					profile.settings.defaultMode = liveStats.mode;
+					var canonical = modes.find(function(m) { return m.toLowerCase() === String(liveStats.mode).toLowerCase(); }) || 'GFWList';
+					profile.settings.defaultMode = canonical;
 					api.saveProfile(loaded.name, profile).then(function(r) {
-						if (r && r.ok) showMsg('success', '已将当前模式「' + liveStats.mode + '」保存为默认设置');
+						if (r && r.ok) showMsg('success', '已将当前模式「' + canonical + '」保存为默认设置');
 						else showMsg('error', '保存失败', (r && r.error) || '');
 					});
 				}
@@ -170,7 +174,9 @@ return view.extend({
 					}, [memberName, delayBadge(delays[memberName])]);
 				});
 
-				return E('div', { 'style': 'margin-top:10px;padding:10px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;' }, [
+				return E('div', {
+					'style': 'margin-top:10px;padding:10px 12px;border:1px solid var(--border-color-medium, rgba(127,127,127,0.25));border-radius:6px;background:var(--background-color-high, rgba(127,127,127,0.05));'
+				}, [
 					E('div', { 'style': 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;' }, [
 						E('div', {}, [
 							E('strong', {}, grp.name),
@@ -182,14 +188,16 @@ return view.extend({
 								'class': 'btn',
 								'style': 'font-size:12px;',
 								'click': function() {
-									showMsg('success', '正在测速代理组「' + grp.name + '」...');
-									Promise.all(grp.all.map(function(m) {
-										return api.clashTestDelay(m).then(function(res) {
-											delays[m] = (res && res.ok && res.data && res.data.delay) ? res.data.delay : 0;
-										}).catch(function() { delays[m] = 0; });
-									})).then(function() {
+									showMsg('success', '正在并发测速代理组「' + grp.name + '」...');
+									api.clashTestGroupDelay(grp.name, 'https://www.gstatic.com/generate_204', 5000).then(function(res) {
+										var delayMap = (res && res.ok && res.data && typeof res.data === 'object') ? res.data : {};
+										grp.all.forEach(function(m) {
+											delays[m] = (typeof delayMap[m] === 'number' && delayMap[m] > 0) ? delayMap[m] : 0;
+										});
 										showMsg('success', '代理组「' + grp.name + '」测速完成');
 										renderClashPanel(curSt);
+									}).catch(function(err) {
+										showMsg('error', '测速失败', String(err));
 									});
 								}
 							}, '测速'),
@@ -205,7 +213,11 @@ return view.extend({
 										var n = (profile.nodes || []).find(function(x) { return x.tag === target; });
 										var t = (profile.settings.tailnets || []).find(function(x) { return x.tag === target; });
 										var found = g || n || t;
-										if (found) profile.settings.proxyDefault = found.id;
+										if (!found) {
+											showMsg('error', '保存失败', '在当前配置方案中未找到出口「' + target + '」');
+											return;
+										}
+										profile.settings.proxyDefault = found.id;
 									}
 									api.saveProfile(loaded.name, profile).then(function(r) {
 										if (r && r.ok) showMsg('success', '已将「' + target + '」保存为默认 proxy 出口');
@@ -228,7 +240,9 @@ return view.extend({
 			]));
 		};
 
-		var refreshAll = function() {
+		var refreshAll = function(force) {
+			if (refreshing && !force) return Promise.resolve();
+			refreshing = true;
 			return api.status().then(function(newSt) {
 				st = newSt || {};
 				if (!st.running) {
@@ -267,16 +281,19 @@ return view.extend({
 					renderStatusGrid(st);
 					renderClashPanel(st);
 				});
+			}).finally(function() {
+				refreshing = false;
 			});
 		};
 
 		var runService = function(action, label) {
 			ui.showModal(label, [E('p', { 'class': 'spinning' }, '正在执行 ' + label + '...')]);
 			return api.serviceAction(action).then(function(res) {
+				uci.unload('singsing');
 				ui.hideModal();
 				if (res && res.ok) showMsg('success', label + '成功', res.output || '');
 				else showMsg('error', label + '失败', (res && (res.error || res.output)) || '未知错误');
-				return refreshAll();
+				return refreshAll(true);
 			}).catch(function(err) {
 				ui.hideModal();
 				showMsg('error', label + '异常', String(err));
@@ -284,26 +301,37 @@ return view.extend({
 		};
 
 		var runGenerateAndApply = function() {
-			ui.showModal('生成并应用配置', [E('p', { 'class': 'spinning' }, '正在校验、补全本地规则集并重启 sing-box...')]);
-			return api.generateAndApply().then(function(res) {
-				ui.hideModal();
-				if (res && res.validationErrors && res.validationErrors.length) {
-					var lines = res.validationErrors.map(function(e) { return '• ' + e.message; }).join('\n');
-					showMsg('error', '配置校验未通过，已拒绝应用', lines);
-				} else if (res && res.ok) {
-					var warnText = (res.warnings && res.warnings.length)
-						? ('警告：\n' + res.warnings.map(function(w) { return '• ' + w.message; }).join('\n'))
-						: '';
-					showMsg('success', '配置已生成、校验通过并成功启动', warnText);
-				} else if (res && res.rolled_back) {
-					showMsg('warning', '新配置启动失败，已自动回滚至上一次有效配置', res.output || '');
-				} else {
-					showMsg('error', '应用配置失败', (res && (res.error || res.output)) || '未知错误');
+			return api.status().then(function(curSt) {
+				if (!curSt || !curSt.enabled) {
+					var stopTask = (curSt && (curSt.running || curSt.dnsmasq_taken_over))
+						? api.serviceAction('stop').catch(function() { return null; })
+						: Promise.resolve();
+					return stopTask.then(function() {
+						showMsg('warning', '当前「启用服务」处于关闭状态，未下载规则集且未启动 sing-box', '如需启动服务，请前往「基本设置」开启「启用服务」后保存并应用。');
+						return refreshAll(true);
+					});
 				}
-				return refreshAll();
-			}).catch(function(err) {
-				ui.hideModal();
-				showMsg('error', '生成或应用异常', String(err));
+				ui.showModal('生成并应用配置', [E('p', { 'class': 'spinning' }, '正在校验、补全本地规则集并重启 sing-box...')]);
+				return api.generateAndApply().then(function(res) {
+					ui.hideModal();
+					if (res && res.validationErrors && res.validationErrors.length) {
+						var lines = res.validationErrors.map(function(e) { return '• ' + e.message; }).join('\n');
+						showMsg('error', '配置校验未通过，已拒绝应用', lines);
+					} else if (res && res.ok) {
+						var warnText = (res.warnings && res.warnings.length)
+							? ('警告：\n' + res.warnings.map(function(w) { return '• ' + w.message; }).join('\n'))
+							: '';
+						showMsg('success', '配置已生成、校验通过并成功启动', warnText);
+					} else if (res && res.rolled_back) {
+						showMsg('warning', '新配置启动失败，已自动回滚至上一次有效配置', res.output || '');
+					} else {
+						showMsg('error', '应用配置失败', (res && (res.error || res.output)) || '未知错误');
+					}
+					return refreshAll(true);
+				}).catch(function(err) {
+					ui.hideModal();
+					showMsg('error', '生成或应用异常', String(err));
+				});
 			});
 		};
 
@@ -314,8 +342,8 @@ return view.extend({
 					? ctx.result.issues.map(function(i) { return '[' + i.level + '] ' + i.message; }).join('\n')
 					: '无校验错误或警告';
 				ui.showModal('生成的 sing-box 配置预览', [
-					E('p', { 'style': 'font-size:12px;color:#555;' }, '规则集已全部本地化（共 ' + ctx.result.ruleSets.length + ' 个本地规则集）'),
-					E('pre', { 'style': 'max-height:120px;overflow:auto;background:#f8fafc;padding:8px;font-size:12px;' }, issuesText),
+					E('p', { 'style': 'font-size:12px;opacity:0.8;' }, '规则集已全部本地化（共 ' + ctx.result.ruleSets.length + ' 个本地规则集）'),
+					E('pre', { 'style': 'max-height:120px;overflow:auto;padding:8px;font-size:12px;border:1px solid var(--border-color-medium, rgba(127,127,127,0.25));border-radius:4px;' }, issuesText),
 					E('pre', { 'style': 'max-height:420px;overflow:auto;background:#1e293b;color:#e2e8f0;padding:10px;font-size:12px;border-radius:4px;' }, jsonText),
 					E('div', { 'class': 'right' }, [
 						E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭')
@@ -327,7 +355,7 @@ return view.extend({
 		var runConnectivityCheck = function() {
 			connCheckBox.innerHTML = '';
 			connCheckBox.appendChild(E('div', { 'class': 'cbi-section' }, [
-				E('p', { 'class': 'spinning' }, '正在从路由器检测国内外分流连通性...')
+				E('p', { 'class': 'spinning' }, '正在从路由器并发检测国内外分流连通性...')
 			]));
 			api.connectivityCheck().then(function(res) {
 				var list = (res && Array.isArray(res.results)) ? res.results : [];
@@ -349,7 +377,6 @@ return view.extend({
 		};
 
 		renderStatusGrid(st);
-		refreshAll();
 		poll.add(refreshAll, 5);
 
 		return E('div', { 'class': 'cbi-map' }, [

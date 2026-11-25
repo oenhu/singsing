@@ -1,0 +1,5 @@
+/etc/singsing/
+/etc/sing-box/config.json
+/etc/sing-box/config.last-good.json
+/etc/sing-box/rule-sets/
+/etc/sing-box/tailscale/

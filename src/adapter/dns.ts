@@ -68,10 +68,17 @@ export function adaptDns(config: Json, settings: OpenWrtSettings): void {
       // Drop `preferred_by: "local"` since `local` is now an explicit external DNS server.
       if (rule.preferred_by === "local") continue;
 
-      // LAN domains are resolved by dnsmasq; never forward them to the external direct DNS.
+      // LAN domains and single-label hostnames are resolved by dnsmasq; never forward them to external DNS.
       if (isLocalDomainsRouteRule(rule)) {
         const { server: _server, ...rest } = rule;
-        adaptedRules.push({ ...rest, action: "predefined", rcode: "NXDOMAIN" });
+        const suffixes = Array.isArray(rest.domain_suffix) ? (rest.domain_suffix as string[]) : [];
+        const bareRoots = suffixes.map((s) => s.replace(/^\./, "")).filter(Boolean);
+        const domain = Array.from(
+          new Set([...(Array.isArray(rest.domain) ? (rest.domain as string[]) : []), ...bareRoots]),
+        );
+        const existingRegex = Array.isArray(rest.domain_regex) ? (rest.domain_regex as string[]) : [];
+        const domain_regex = existingRegex.includes("^[^.]+$") ? existingRegex : [...existingRegex, "^[^.]+$"];
+        adaptedRules.push({ ...rest, domain, domain_regex, action: "predefined", rcode: "NXDOMAIN" });
         continue;
       }
 
@@ -96,9 +103,12 @@ export function adaptDns(config: Json, settings: OpenWrtSettings): void {
   }
   config.inbounds = inbounds;
 
-  // Prepend dns-in hijack rule at the top of route.rules.
+  // Prepend dns-in hijack rule at the top of route.rules; remove general port-53 hijack when hijack=false.
   const route = config.route as { rules?: Json[] } | undefined;
   if (route && Array.isArray(route.rules)) {
+    if (!settings.dns.hijack) {
+      route.rules = route.rules.filter((r) => !(r.action === "hijack-dns" && r.inbound !== "dns-in"));
+    }
     const hasDnsInRule = route.rules.some((r) => r.inbound === "dns-in" && r.action === "hijack-dns");
     if (!hasDnsInRule) {
       route.rules.unshift({ inbound: "dns-in", action: "hijack-dns" });

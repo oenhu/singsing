@@ -181,6 +181,15 @@ return view.extend({
 					E('button', {
 						'class': 'btn cbi-button-action',
 						'click': function() {
+							if (!outSel.value) {
+								errDiv.textContent = '请选择流量出口';
+								return;
+							}
+							var cleanLines = linesArea.value.split('\n').map(function(l) { return l.trim(); }).filter(Boolean);
+							if (!cleanLines.length && !sets.length) {
+								errDiv.textContent = '请至少填写一条域名/IP 或添加一个关联规则集';
+								return;
+							}
 							var parsed = engine.parseRuleList(linesArea.value);
 							if (parsed.invalid.length) {
 								errDiv.textContent = '域名或 IP 格式有误：' + parsed.invalid.map(function(x) { return x.entry + '（' + x.reason + '）'; }).join('、');
@@ -188,7 +197,7 @@ return view.extend({
 							}
 							var draft = Object.assign({}, rule, {
 								outbound: outSel.value,
-								lines: linesArea.value.split('\n').map(function(l) { return l.trim(); }).filter(Boolean),
+								lines: cleanLines,
 								ruleSets: sets
 							});
 							if (isNew) {
@@ -483,8 +492,19 @@ return view.extend({
 			return Promise.all([
 				api.saveProfile(profileName, profile),
 				api.saveAccessControl(JSON.stringify(ac, null, 2))
-			]).then(function() {
+			]).then(function(r) {
+				if (!r[0] || !r[0].ok) {
+					var e1 = (r[0] && r[0].error) || '保存路由规则失败';
+					notify(false, e1);
+					return Promise.reject(new Error(e1));
+				}
+				if (!r[1] || !r[1].ok) {
+					var e2 = (r[1] && r[1].error) || '保存客户端访问控制失败';
+					notify(false, e2);
+					return Promise.reject(new Error(e2));
+				}
 				ui.addNotification(null, E('p', '路由分流与客户端访问控制已保存'), 'info');
+				return r;
 			});
 		};
 

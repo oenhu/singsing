@@ -23,6 +23,7 @@
 			"uci": [ "singsing" ],
 			"ubus": {
 				"luci.singsing": [
+					"commit_uci",
 					"save_profile",
 					"delete_profile",
 					"validate_config",

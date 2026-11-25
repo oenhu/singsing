@@ -10,6 +10,12 @@ var callStatus = rpc.declare({
 	expect: {}
 });
 
+var callCommitUci = rpc.declare({
+	object: 'luci.singsing',
+	method: 'commit_uci',
+	expect: {}
+});
+
 var callGetProfile = rpc.declare({
 	object: 'luci.singsing',
 	method: 'get_profile',
@@ -94,7 +100,7 @@ var callRulesetUpdate = rpc.declare({
 var callRulesetUpload = rpc.declare({
 	object: 'luci.singsing',
 	method: 'ruleset_upload',
-	params: ['tag', 'format', 'content_b64'],
+	params: ['tag', 'format', 'content_b64', 'chunk_index', 'total_chunks'],
 	expect: {}
 });
 
@@ -193,8 +199,13 @@ function loadEngine() {
 	return enginePromise;
 }
 
+function reloadUciSingsing() {
+	uci.unload('singsing');
+	return uci.load('singsing');
+}
+
 function readOpenWrtSettings(lanIps) {
-	return uci.load('singsing').then(function() {
+	return reloadUciSingsing().then(function() {
 		var get = function(sec, opt, def) {
 			var v = uci.get('singsing', sec, opt);
 			return (v !== undefined && v !== null && v !== '') ? v : def;
@@ -245,12 +256,16 @@ function readOpenWrtSettings(lanIps) {
 }
 
 function loadActiveProfile() {
-	return Promise.all([loadEngine(), uci.load('singsing')]).then(function(res) {
+	return Promise.all([loadEngine(), reloadUciSingsing()]).then(function(res) {
 		var engine = res[0];
 		var name = uci.get('singsing', 'main', 'active_profile') || 'default';
 		return callGetProfile(name).then(function(pRes) {
 			if (pRes && pRes.exists && pRes.profile) {
-				return { name: name, profile: engine.normalizeProfile(pRes.profile), engine: engine };
+				try {
+					return { name: name, profile: engine.normalizeProfile(pRes.profile), engine: engine };
+				} catch (e) {
+					return { name: name, profile: engine.blueprintProfile(), engine: engine, corruptedError: String(e) };
+				}
 			}
 			return { name: name, profile: engine.blueprintProfile(), engine: engine };
 		});
@@ -313,12 +328,17 @@ function applyUciIfChanged() {
 	return uci.save().then(function() {
 		return uci.changes();
 	}).then(function(changes) {
-		return (changes && Object.keys(changes).length > 0) ? uci.apply() : Promise.resolve();
+		if (changes && changes.singsing && Object.keys(changes.singsing).length > 0) {
+			return callCommitUci().then(function() {
+				return reloadUciSingsing();
+			});
+		}
+		return Promise.resolve();
 	});
 }
 
 function switchActiveProfile(name) {
-	return uci.load('singsing').then(function() {
+	return reloadUciSingsing().then(function() {
 		uci.set('singsing', 'main', 'active_profile', name);
 		return applyUciIfChanged();
 	});
@@ -346,6 +366,12 @@ function clashTestDelay(name, url, timeout) {
 	return callClashApi('GET', '/proxies/' + encodeURIComponent(name) + '/delay' + q, '');
 }
 
+function clashTestGroupDelay(group, url, timeout) {
+	var q = '?timeout=' + encodeURIComponent(String(timeout || 5000)) +
+		'&url=' + encodeURIComponent(url || 'https://www.gstatic.com/generate_204');
+	return callClashApi('GET', '/group/' + encodeURIComponent(group) + '/delay' + q, '');
+}
+
 function clashGetConnections() {
 	return callClashApi('GET', '/connections', '');
 }
@@ -359,28 +385,32 @@ function clashCloseAllConnections() {
 }
 
 function applyWithNotify() {
-	return uci.load('singsing').then(function() {
+	return Promise.all([reloadUciSingsing(), callStatus()]).then(function(res) {
+		var st = res[1] || {};
 		var enabled = uci.get('singsing', 'main', 'enabled') === '1';
 		if (!enabled) {
-			return callServiceAction('stop').catch(function() { return null; }).then(function() {
-				ui.addNotification(null, E('p', '配置已保存（当前「启用服务」未开启，未启动 sing-box）'), 'info');
+			var stopPromise = (st.running || st.dnsmasq_taken_over)
+				? callServiceAction('stop').catch(function() { return null; })
+				: Promise.resolve();
+			return stopPromise.then(function() {
+				ui.addNotification(null, E('p', '配置已保存（当前「启用服务」未开启，未下载规则集且未启动 sing-box）'), 'info');
 				return { ok: true, skipped_start: true };
 			});
 		}
 		ui.showModal('保存并应用', [E('p', { 'class': 'spinning' }, '正在生成配置、校验并重启 sing-box...')]);
-		return generateAndApply().then(function(res) {
+		return generateAndApply().then(function(applyRes) {
 			ui.hideModal();
-			if (res && res.validationErrors && res.validationErrors.length) {
-				var lines = res.validationErrors.map(function(e) { return '• ' + e.message; }).join('\n');
+			if (applyRes && applyRes.validationErrors && applyRes.validationErrors.length) {
+				var lines = applyRes.validationErrors.map(function(e) { return '• ' + e.message; }).join('\n');
 				ui.addNotification('配置校验未通过，已保存但未应用', E('pre', { 'style': 'white-space:pre-wrap;' }, lines), 'danger');
-			} else if (res && res.ok) {
+			} else if (applyRes && applyRes.ok) {
 				ui.addNotification(null, E('p', '配置已保存并成功应用到 sing-box'), 'info');
-			} else if (res && res.rolled_back) {
-				ui.addNotification('启动失败已自动回滚', E('pre', { 'style': 'white-space:pre-wrap;' }, res.output || ''), 'warning');
+			} else if (applyRes && applyRes.rolled_back) {
+				ui.addNotification('启动失败已自动回滚', E('pre', { 'style': 'white-space:pre-wrap;' }, applyRes.output || ''), 'warning');
 			} else {
-				ui.addNotification('应用配置失败', E('pre', { 'style': 'white-space:pre-wrap;' }, (res && (res.error || res.output)) || '未知错误'), 'danger');
+				ui.addNotification('应用配置失败', E('pre', { 'style': 'white-space:pre-wrap;' }, (applyRes && (applyRes.error || applyRes.output)) || '未知错误'), 'danger');
 			}
-			return res;
+			return applyRes;
 		}).catch(function(err) {
 			ui.hideModal();
 			ui.addNotification('应用配置异常', E('p', String(err)), 'danger');
@@ -390,6 +420,7 @@ function applyWithNotify() {
 
 return baseclass.extend({
 	status: callStatus,
+	commitUci: callCommitUci,
 	getProfile: callGetProfile,
 	saveProfile: saveActiveProfile,
 	listProfiles: callListProfiles,
@@ -415,6 +446,7 @@ return baseclass.extend({
 	clashGetProxies: clashGetProxies,
 	clashSelectProxy: clashSelectProxy,
 	clashTestDelay: clashTestDelay,
+	clashTestGroupDelay: clashTestGroupDelay,
 	clashGetConnections: clashGetConnections,
 	clashCloseConnection: clashCloseConnection,
 	clashCloseAllConnections: clashCloseAllConnections,

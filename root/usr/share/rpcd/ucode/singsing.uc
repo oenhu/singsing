@@ -1,6 +1,6 @@
 'use strict';
 
-import { readfile, writefile, stat, unlink, popen, lsdir, chmod } from 'fs';
+import { readfile, writefile, stat, unlink, rename, popen, lsdir, chmod } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_DIR = '/etc/singsing';
@@ -15,11 +15,23 @@ const TMP_NEW_CONFIG = '/tmp/singsing/config.new.json';
 const SERVICE_MGR = '/usr/share/singsing/service-manager.sh';
 const SUB_UPDATER = '/usr/share/singsing/subscription-updater.uc';
 const INIT_SCRIPT = '/etc/init.d/singsing';
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+let tmpSeq = 0;
 
 function writeFileSafe(path, data, mode) {
-	let n = writefile(path, data);
-	if (n == null) return false;
-	if (mode != null) chmod(path, mode);
+	let payload = (type(data) == 'string') ? data : ('' + (data ?? ''));
+	let tmp = `${path}.tmp.${time()}.${++tmpSeq}`;
+	let n = writefile(tmp, payload);
+	if (n == null || n != length(payload)) {
+		unlink(tmp);
+		return false;
+	}
+	if (mode != null) chmod(tmp, mode);
+	if (!rename(tmp, path)) {
+		unlink(tmp);
+		return false;
+	}
 	return true;
 }
 
@@ -31,10 +43,22 @@ function runCmd(cmd) {
 	return { code: rc, output: trim(out) };
 }
 
+function shellQuote(s) {
+	return "'" + replace('' + (s ?? ''), "'", "'\\''") + "'";
+}
+
 function safeProfileName(name) {
 	if (type(name) != 'string' || !match(name, /^[a-zA-Z0-9_-]{1,64}$/))
 		return null;
 	return name;
+}
+
+function safeRulesetTag(tag) {
+	if (type(tag) != 'string' || index(tag, '..') >= 0)
+		return null;
+	if (!match(tag, /^[a-zA-Z0-9_!@-][a-zA-Z0-9_!@.-]{0,127}$/))
+		return null;
+	return tag;
 }
 
 function getUci() {
@@ -47,6 +71,37 @@ function getSingboxBin(c) {
 	return c.get('singsing', 'main', 'singbox_bin') || '/usr/bin/sing-box';
 }
 
+function getRulesetDir(c) {
+	let dir = replace(c.get('singsing', 'main', 'ruleset_dir') || '/etc/sing-box/rule-sets', /\/+$/, '');
+	if (substr(dir, 0, 1) != '/' || index(dir, '..') >= 0)
+		return '/etc/sing-box/rule-sets';
+	return dir;
+}
+
+function sanitizeManifest(raw, c) {
+	let arr = (type(raw) == 'string') ? json(raw) : raw;
+	if (type(arr) != 'array') return null;
+	let dir = getRulesetDir(c);
+	let out = [];
+	for (let r in arr) {
+		if (type(r) != 'object') return null;
+		let tag = safeRulesetTag(r.tag);
+		if (!tag) return null;
+		let fmt = (r.format == 'source') ? 'source' : 'binary';
+		let url = trim('' + (r.url || ''));
+		if (length(url) > 0 && !match(url, /^https?:\/\/[^[:space:]]+$/))
+			return null;
+		let ext = (fmt == 'source') ? 'json' : 'srs';
+		push(out, {
+			tag: tag,
+			url: url,
+			format: fmt,
+			path: `${dir}/${tag}.${ext}`
+		});
+	}
+	return out;
+}
+
 function getDnsmasqDropinPath() {
 	let r = runCmd(`uci -q show "dhcp.@dnsmasq[0]" 2>/dev/null | awk 'NR==1 {split($0, c, /[.=]/); print c[2]}'`);
 	let confDir = '/tmp/dnsmasq.d';
@@ -57,6 +112,8 @@ function getDnsmasqDropinPath() {
 			for (let line in split(raw, '\n')) {
 				if (substr(line, 0, 9) == 'conf-dir=') {
 					let d = trim(substr(line, 9));
+					let comma = index(d, ',');
+					if (comma >= 0) d = trim(substr(d, 0, comma));
 					if (length(d) > 0) confDir = d;
 					break;
 				}
@@ -67,17 +124,65 @@ function getDnsmasqDropinPath() {
 }
 
 function isDnsmasqTakenOver() {
-	return stat(getDnsmasqDropinPath()) != null || stat(DNSMASQ_BACKUP) != null;
+	if (stat(getDnsmasqDropinPath()) != null || stat('/tmp/dnsmasq.d/dnsmasq-singsing.conf') != null || stat(DNSMASQ_BACKUP) != null)
+		return true;
+	let tmpEntries = lsdir('/tmp') || [];
+	for (let e in tmpEntries) {
+		if (substr(e, 0, 8) == 'dnsmasq.' && substr(e, length(e) - 2, 2) == '.d') {
+			if (stat(`/tmp/${e}/dnsmasq-singsing.conf`) != null)
+				return true;
+		}
+	}
+	return false;
+}
+
+function getLanDev() {
+	let u = runCmd(`ubus call network.interface.lan status 2>/dev/null`);
+	if (u.code == 0 && length(u.output) > 0) {
+		let d = json(u.output);
+		let dev = d?.l3_device || d?.device;
+		if (type(dev) == 'string' && match(dev, /^[a-zA-Z0-9_.:-]+$/))
+			return dev;
+	}
+	return 'br-lan';
 }
 
 function getLanIps() {
-	let res = runCmd("ip -o addr show br-lan 2>/dev/null | awk '{print $4}' | cut -d/ -f1");
-	if (res.code != 0 || !res.output) return [];
-	return filter(split(res.output, '\n'), (x) => length(trim(x)) > 0);
+	let ips = [];
+	let seen = {};
+	let addIp = (ip) => {
+		let v = trim('' + (ip || ''));
+		if (length(v) > 0 && !seen[v]) {
+			seen[v] = true;
+			push(ips, v);
+		}
+	};
+
+	let u = runCmd(`ubus call network.interface dump 2>/dev/null`);
+	if (u.code == 0 && length(u.output) > 0) {
+		let d = json(u.output);
+		for (let ifc in (d?.interface || [])) {
+			if (ifc.interface == 'loopback') continue;
+			for (let k in ['ipv4-address', 'ipv6-address']) {
+				for (let a in (ifc[k] || [])) addIp(a?.address);
+			}
+			for (let pa in (ifc['ipv6-prefix-assignment'] || [])) {
+				addIp(pa?.['local-address']?.address);
+			}
+		}
+	}
+
+	if (length(ips) == 0) {
+		let dev = getLanDev();
+		let res = runCmd(`ip -o addr show ${shellQuote(dev)} 2>/dev/null | awk '{print $4}' | cut -d/ -f1`);
+		if (res.code == 0 && res.output) {
+			for (let x in split(res.output, '\n')) addIp(x);
+		}
+	}
+	return ips;
 }
 
 function getServicePid() {
-	// Native procd query via ubus (works on both OpenWrt 24.10 and 25.12 without pgrep)
 	let u = runCmd(`ubus call service list '{"name":"singsing"}' 2>/dev/null`);
 	if (u.code == 0 && length(u.output) > 0) {
 		let parsed = json(u.output);
@@ -89,10 +194,12 @@ function getServicePid() {
 }
 
 function isPortListening(port) {
-	let ss = runCmd(`ss -lntu 2>/dev/null | grep -E ":${port}[[:space:]]"`);
-	if (ss.code == 0 && length(ss.output) > 0) return true;
-	let ns = runCmd(`netstat -lntu 2>/dev/null | grep -E ":${port}[[:space:]]"`);
-	if (ns.code == 0 && length(ns.output) > 0) return true;
+	let p = int(port);
+	if (p < 1 || p > 65535) return false;
+	let ss = runCmd(`ss -Hlntu 2>/dev/null | awk -v p=":${p}" '$5 ~ p "$" {print 1; exit}'`);
+	if (ss.code == 0 && ss.output == '1') return true;
+	let ns = runCmd(`netstat -lntu 2>/dev/null | awk -v p=":${p}" '$4 ~ p "$" {print 1; exit}'`);
+	if (ns.code == 0 && ns.output == '1') return true;
 	return false;
 }
 
@@ -109,14 +216,27 @@ function getClashApiConfig() {
 	let cfg = json(raw);
 	let api = cfg?.experimental?.clash_api;
 	if (!api || !api.external_controller) return null;
-	return {
-		controller: trim(api.external_controller),
-		secret: api.secret || ''
-	};
-}
 
-function shellQuote(s) {
-	return "'" + replace('' + (s ?? ''), "'", "'\\''") + "'";
+	let ctrl = trim('' + api.external_controller);
+	let hm = match(ctrl, /^\[([^\]]+)\]:([0-9]+)$/) || match(ctrl, /^([^:]*):([0-9]+)$/);
+	if (!hm) return null;
+	let host = lc(trim(hm[1] || ''));
+	let port = int(hm[2]);
+	if (port < 1 || port > 65535) return null;
+
+	// Strictly restrict to loopback / wildcard listeners on this router (prevent SSRF & secret leak)
+	let connectHost = null;
+	if (host == '' || host == '0.0.0.0' || host == '127.0.0.1' || host == 'localhost' || host == '::')
+		connectHost = '127.0.0.1';
+	else if (host == '::1')
+		connectHost = '[::1]';
+	else
+		return null;
+
+	return {
+		controller: `${connectHost}:${port}`,
+		secret: '' + (api.secret || '')
+	};
 }
 
 const methods = {
@@ -127,7 +247,7 @@ const methods = {
 			let binStat = stat(bin);
 			let version = '';
 			if (binStat) {
-				let v = runCmd(`"${bin}" version 2>/dev/null | head -n 1`);
+				let v = runCmd(`${shellQuote(bin)} version 2>/dev/null | head -n 1`);
 				if (v.code == 0) version = v.output;
 			}
 
@@ -166,6 +286,14 @@ const methods = {
 				listen_port: int(c.get('singsing', 'dns', 'listen_port') || '5335'),
 				lan_ips: getLanIps()
 			};
+		}
+	},
+
+	commit_uci: {
+		call: function() {
+			let c = getUci();
+			let ok = c.commit('singsing');
+			return { ok: !!ok };
 		}
 	},
 
@@ -227,10 +355,10 @@ const methods = {
 		call: function(req) {
 			if (type(req.args.config) != 'string') return { ok: false, error: 'Missing config JSON' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			let tmpPath = '/tmp/singsing/validate.tmp.json';
+			let tmpPath = `/tmp/singsing/validate.${time()}.${++tmpSeq}.json`;
 			if (!writeFileSafe(tmpPath, req.args.config, 0600))
 				return { ok: false, error: 'Failed to write temporary config' };
-			let res = runCmd(`${SERVICE_MGR} validate_config "${tmpPath}"`);
+			let res = runCmd(`${SERVICE_MGR} validate_config ${shellQuote(tmpPath)}`);
 			unlink(tmpPath);
 			return { ok: res.code == 0, output: res.output };
 		}
@@ -240,10 +368,14 @@ const methods = {
 		args: { config: 'string', manifest: 'string' },
 		call: function(req) {
 			if (type(req.args.config) != 'string') return { ok: false, error: 'Missing config JSON' };
+			let c = getUci();
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 
-			if (type(req.args.manifest) == 'string' && length(req.args.manifest) > 0) {
-				if (!writeFileSafe(MANIFEST_FILE, req.args.manifest, 0644))
+			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
+				let cleanManifest = sanitizeManifest(req.args.manifest, c);
+				if (!cleanManifest)
+					return { ok: false, error: 'Invalid rule-sets manifest' };
+				if (!writeFileSafe(MANIFEST_FILE, sprintf('%.2J', cleanManifest), 0600))
 					return { ok: false, error: 'Failed to write rule-sets manifest' };
 			}
 
@@ -266,17 +398,20 @@ const methods = {
 			if (act != 'start' && act != 'stop' && act != 'restart')
 				return { ok: false, error: 'Unsupported action' };
 
+			let c = getUci();
 			if (act == 'start' || act == 'restart') {
-				let c = getUci();
-				let localDns = c.get('singsing', 'dns', 'local_server') || '';
-				if (length(trim(localDns)) == 0)
-					return { ok: false, error: '必须先填写直连上游 DNS 地址后才能启动服务' };
-				c.set('singsing', 'main', 'enabled', '1');
-				c.commit('singsing');
+				let localDns = trim(c.get('singsing', 'dns', 'local_server') || '');
+				if (length(localDns) == 0 || runCmd(`${SERVICE_MGR} check_local_dns ${shellQuote(localDns)}`).code != 0)
+					return { ok: false, error: '必须先填写有效的直连上游 DNS IP（不可为空、域名、回环地址或路由器自身 IP）' };
+				if (c.get('singsing', 'main', 'enabled') != '1') {
+					c.set('singsing', 'main', 'enabled', '1');
+					c.commit('singsing');
+				}
 			} else if (act == 'stop') {
-				let c = getUci();
-				c.set('singsing', 'main', 'enabled', '0');
-				c.commit('singsing');
+				if (c.get('singsing', 'main', 'enabled') != '0') {
+					c.set('singsing', 'main', 'enabled', '0');
+					c.commit('singsing');
+				}
 			}
 
 			let res = runCmd(`${INIT_SCRIPT} ${act}`);
@@ -305,13 +440,14 @@ const methods = {
 	ruleset_status: {
 		args: { manifest: '' },
 		call: function(req) {
+			let c = getUci();
 			let arr = null;
 			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
-				arr = json(req.args.manifest);
+				arr = sanitizeManifest(req.args.manifest, c);
 			}
 			if (type(arr) != 'array') {
 				let raw = readfile(MANIFEST_FILE);
-				arr = raw ? json(raw) : [];
+				arr = raw ? sanitizeManifest(raw, c) : [];
 			}
 			if (type(arr) != 'array') arr = [];
 
@@ -343,14 +479,22 @@ const methods = {
 	save_ruleset_urls: {
 		args: { urls: '', manifest: '' },
 		call: function(req) {
+			let c = getUci();
 			let parsed = json(req.args.urls || '{}');
 			if (type(parsed) != 'object')
 				return { ok: false, error: 'Invalid URLs map' };
+			for (let k, v in parsed) {
+				if (!safeRulesetTag(k) || type(v) != 'string' || !match(trim(v), /^https?:\/\/[^[:space:]]+$/))
+					return { ok: false, error: 'Invalid rule-set tag or URL' };
+			}
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			if (!writeFileSafe(RULESET_URLS_FILE, req.args.urls || '{}', 0644))
+			if (!writeFileSafe(RULESET_URLS_FILE, sprintf('%.2J', parsed), 0600))
 				return { ok: false, error: 'Failed to save rule-set URLs' };
 			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
-				writeFileSafe(MANIFEST_FILE, req.args.manifest, 0644);
+				let cleanManifest = sanitizeManifest(req.args.manifest, c);
+				if (!cleanManifest)
+					return { ok: false, error: 'Invalid rule-sets manifest' };
+				writeFileSafe(MANIFEST_FILE, sprintf('%.2J', cleanManifest), 0600);
 			}
 			return { ok: true };
 		}
@@ -359,14 +503,18 @@ const methods = {
 	ruleset_update: {
 		args: { tag: '', manifest: '' },
 		call: function(req) {
-			let tag = req.args.tag || '';
-			if (length(tag) > 0 && !match(tag, /^[a-zA-Z0-9_!@.-]+$/))
+			let c = getUci();
+			let tag = trim(req.args.tag || '');
+			if (length(tag) > 0 && !safeRulesetTag(tag))
 				return { ok: false, error: 'Invalid rule-set tag' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
-				writeFileSafe(MANIFEST_FILE, req.args.manifest, 0644);
+				let cleanManifest = sanitizeManifest(req.args.manifest, c);
+				if (!cleanManifest)
+					return { ok: false, error: 'Invalid rule-sets manifest' };
+				writeFileSafe(MANIFEST_FILE, sprintf('%.2J', cleanManifest), 0600);
 			}
-			let res = runCmd(`${SERVICE_MGR} update_rulesets "${tag}"`);
+			let res = runCmd(`${SERVICE_MGR} update_rulesets ${shellQuote(tag)}`);
 			let parsed = json(res.output);
 			if (parsed) return parsed;
 			return { ok: res.code == 0, output: res.output };
@@ -388,18 +536,28 @@ const methods = {
 		args: { method: '', path: '', body: '' },
 		call: function(req) {
 			let api = getClashApiConfig();
-			if (!api) return { ok: false, error: 'Clash API 未启用或配置不存在' };
+			if (!api) return { ok: false, error: 'Clash API 未启用、配置不存在或非本机监听地址' };
 
 			let m = uc(trim(req.args.method || 'GET'));
 			if (m != 'GET' && m != 'PUT' && m != 'PATCH' && m != 'DELETE')
 				return { ok: false, error: '不支持的 HTTP 方法' };
 
 			let p = trim(req.args.path || '');
-			if (!match(p, /^\/(configs|proxies|connections|version)(\/[^[:space:]]*)?(\?[^[:space:]]*)?$/))
+			if (index(p, '..') >= 0 || index(p, '#') >= 0 || index(p, '\\') >= 0)
+				return { ok: false, error: '非法的 Clash API 路径' };
+			if (!match(p, /^\/(configs|proxies|group|connections|version)(\/[^[:space:]?#]*)?(\?[^[:space:]#]*)?$/))
 				return { ok: false, error: '不支持的 Clash API 路径' };
+			if (m == 'PUT' && match(p, /^\/configs(\/|\?|$)/))
+				return { ok: false, error: '禁止通过代理重载外部配置文件' };
+			if (m == 'PATCH' && match(p, /^\/configs(\/|\?|$)/)) {
+				let patchObj = json(req.args.body || '{}');
+				if (type(patchObj) != 'object' || type(patchObj.mode) != 'string')
+					return { ok: false, error: 'PATCH /configs 仅允许切换 mode' };
+				req.args.body = sprintf('%J', { mode: patchObj.mode });
+			}
 
 			let url = `http://${api.controller}${p}`;
-			let cmd = `curl -sS --connect-timeout 3 --max-time 8 -w "\\n%{http_code}" -X ${m}`;
+			let cmd = `curl -sS --path-as-is --connect-timeout 3 --max-time 8 -w "\\n%{http_code}" -X ${m}`;
 			if (length(api.secret) > 0)
 				cmd += ` -H ${shellQuote('Authorization: Bearer ' + api.secret)}`;
 			if (type(req.args.body) == 'string' && length(req.args.body) > 0)
@@ -411,8 +569,14 @@ const methods = {
 				return { ok: false, error: res.output || '无法连接到本机 Clash API' };
 
 			let idx = rindex(res.output, '\n');
-			let bodyStr = idx >= 0 ? substr(res.output, 0, idx) : '';
-			let statusCode = idx >= 0 ? int(substr(res.output, idx + 1)) : 0;
+			let bodyStr = '';
+			let statusCode = 0;
+			if (idx >= 0) {
+				bodyStr = substr(res.output, 0, idx);
+				statusCode = int(substr(res.output, idx + 1));
+			} else if (match(res.output, /^[0-9]{3}$/)) {
+				statusCode = int(res.output);
+			}
 			let data = length(trim(bodyStr)) > 0 ? json(bodyStr) : null;
 
 			return {
@@ -455,9 +619,9 @@ const methods = {
 			let ua = trim(req.args.user_agent || '') || 'sing-box/1.14';
 			let cmd = '';
 			if (runCmd('command -v curl').code == 0) {
-				cmd = `curl -fsSL --connect-timeout 15 --max-time 60 -A ${shellQuote(ua)} ${shellQuote(u)}`;
+				cmd = `curl -fsSL --proto '=http,https' --proto-redir '=http,https' --max-filesize 8388608 --connect-timeout 8 --max-time 20 -A ${shellQuote(ua)} ${shellQuote(u)}`;
 			} else {
-				cmd = `uclient-fetch -q -T 30 -U ${shellQuote(ua)} -O - ${shellQuote(u)}`;
+				cmd = `uclient-fetch -q -T 15 -U ${shellQuote(ua)} -O - ${shellQuote(u)}`;
 			}
 			let res = runCmd(cmd);
 			if (res.code != 0 || length(trim(res.output)) == 0)
@@ -487,13 +651,18 @@ const methods = {
 	},
 
 	ruleset_upload: {
-		args: { tag: '', format: '', content_b64: '' },
+		args: { tag: '', format: '', content_b64: '', chunk_index: 0, total_chunks: 1 },
 		call: function(req) {
-			let tag = trim(req.args.tag || '');
-			if (!match(tag, /^[a-zA-Z0-9_!@.-]{1,128}$/))
+			let tag = safeRulesetTag(trim(req.args.tag || ''));
+			if (!tag)
 				return { ok: false, error: '无效的规则集标签' };
 			if (type(req.args.content_b64) != 'string' || length(req.args.content_b64) == 0)
 				return { ok: false, error: '文件内容为空' };
+
+			let chunkIdx = int(req.args.chunk_index ?? 0);
+			let totalChunks = int(req.args.total_chunks ?? 1);
+			if (chunkIdx < 0 || totalChunks < 1 || chunkIdx >= totalChunks || totalChunks > 64)
+				return { ok: false, error: '无效的分片参数' };
 
 			let rawBytes = null;
 			try {
@@ -501,22 +670,45 @@ const methods = {
 			} catch (e) {
 				return { ok: false, error: 'Base64 解码失败' };
 			}
-			if (!rawBytes || length(rawBytes) == 0)
+			if (rawBytes == null || length(rawBytes) == 0)
 				return { ok: false, error: '解码后文件内容为空' };
 
-			let fmt = (req.args.format == 'source') ? 'source' : 'binary';
-			if (fmt == 'source' && json(rawBytes) == null)
-				return { ok: false, error: 'JSON 规则集格式无效' };
-
 			let c = getUci();
-			let dir = replace(c.get('singsing', 'main', 'ruleset_dir') || '/etc/sing-box/rule-sets', /\/+$/, '');
+			let dir = getRulesetDir(c);
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
+			let fmt = (req.args.format == 'source') ? 'source' : 'binary';
 			let ext = (fmt == 'source') ? 'json' : 'srs';
 			let dest = `${dir}/${tag}.${ext}`;
-			if (!writeFileSafe(dest, rawBytes, 0644))
+			let partPath = `/tmp/singsing/upload.${tag}.${ext}.part`;
+
+			let combined = rawBytes;
+			if (chunkIdx > 0) {
+				let prev = readfile(partPath);
+				if (prev == null)
+					return { ok: false, error: '上传分片丢失，请重试' };
+				combined = prev + rawBytes;
+			}
+			if (length(combined) > MAX_UPLOAD_BYTES) {
+				unlink(partPath);
+				return { ok: false, error: '文件过大（超过 4MB 上限）' };
+			}
+
+			if (chunkIdx + 1 < totalChunks) {
+				if (!writeFileSafe(partPath, combined, 0600)) {
+					unlink(partPath);
+					return { ok: false, error: '写入临时分片失败' };
+				}
+				return { ok: true, partial: true, received: length(combined) };
+			}
+
+			unlink(partPath);
+			if (fmt == 'source' && json(combined) == null)
+				return { ok: false, error: 'JSON 规则集格式无效' };
+
+			if (!writeFileSafe(dest, combined, 0644))
 				return { ok: false, error: '写入规则集文件失败：' + dest };
 
-			return { ok: true, path: dest, size: length(rawBytes) };
+			return { ok: true, path: dest, size: length(combined) };
 		}
 	},
 
@@ -528,17 +720,26 @@ const methods = {
 				{ id: 'google', label: 'Google（海外代理）', url: 'https://www.google.com/generate_204' },
 				{ id: 'github', label: 'GitHub（海外代理）', url: 'https://github.com' }
 			];
+			runCmd(`${SERVICE_MGR} ensure_dirs`);
+			let prefix = `/tmp/singsing/conn.${time()}.${++tmpSeq}`;
+			let subCmds = [];
+			for (let i = 0; i < length(targets); i++) {
+				let t = targets[i];
+				push(subCmds, `(curl -sS -o /dev/null --connect-timeout 2 --max-time 3 -w "%{http_code} %{time_total}" ${shellQuote(t.url)} > "${prefix}.${i}" 2>/dev/null || echo "0 0" > "${prefix}.${i}") &`);
+			}
+			push(subCmds, 'wait');
+			runCmd(join(' ', subCmds));
+
 			let results = [];
-			for (let t in targets) {
-				let res = runCmd(`curl -sS -o /dev/null --connect-timeout 2 --max-time 3 -w "%{http_code} %{time_total}" ${shellQuote(t.url)}`);
-				let code = 0, ms = 0, ok = false;
-				if (res.code == 0) {
-					let parts = split(trim(res.output), /\s+/);
-					code = int(parts[0] || 0);
-					let sec = +(parts[1] || 0);
-					ms = sec > 0 ? int(sec * 1000) : 0;
-					ok = (code >= 200 && code < 400);
-				}
+			for (let i = 0; i < length(targets); i++) {
+				let t = targets[i];
+				let out = trim(readfile(`${prefix}.${i}`) || '');
+				unlink(`${prefix}.${i}`);
+				let parts = split(out, /\s+/);
+				let code = int(parts[0] || 0);
+				let sec = +(parts[1] || 0);
+				let ms = sec > 0 ? int(sec * 1000) : 0;
+				let ok = (code >= 200 && code < 400);
 				push(results, {
 					id: t.id,
 					label: t.label,
@@ -570,7 +771,7 @@ const methods = {
 			if (type(parsed) != 'object')
 				return { ok: false, error: 'Invalid access control JSON' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			if (!writeFileSafe(ACCESS_FILE, req.args.data || '{}', 0644))
+			if (!writeFileSafe(ACCESS_FILE, req.args.data || '{}', 0600))
 				return { ok: false, error: 'Failed to write access-control.json' };
 			return { ok: true };
 		}
@@ -595,13 +796,27 @@ const methods = {
 					}
 				}
 			}
-			let neigh = runCmd("ip neigh show dev br-lan 2>/dev/null");
+			let lanDev = getLanDev();
+			let neigh = runCmd(`ip neigh show dev ${shellQuote(lanDev)} 2>/dev/null`);
 			if (neigh.code == 0 && length(neigh.output) > 0) {
 				for (let line in split(neigh.output, '\n')) {
 					let m = match(trim(line), /^(\S+)\s+lladdr\s+([0-9a-fA-F:]{17})/);
 					if (m && !seen[m[1]]) {
 						seen[m[1]] = true;
 						push(list, { ip: m[1], mac: lc(m[2]), hostname: '' });
+					}
+				}
+			} else {
+				let arp = readfile('/proc/net/arp');
+				if (arp) {
+					let idx = 0;
+					for (let line in split(arp, '\n')) {
+						if (idx++ == 0) continue;
+						let parts = split(trim(line), /\s+/);
+						if (length(parts) >= 6 && parts[3] != '00:00:00:00:00:00' && !seen[parts[0]]) {
+							seen[parts[0]] = true;
+							push(list, { ip: parts[0], mac: lc(parts[3]), hostname: '' });
+						}
 					}
 				}
 			}

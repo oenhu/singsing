@@ -34,7 +34,7 @@ return view.extend({
 		var notify = function(ok, text) {
 			statusBar.innerHTML = '';
 			statusBar.appendChild(E('div', {
-				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
+				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#166534' : '#991b1b') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
 			}, text));
 		};
 
@@ -60,11 +60,18 @@ return view.extend({
 					});
 				}
 
-				var imported = engine.importConfig(res.content);
-				if (imported.error || !imported.nodes || !imported.nodes.length) {
+				var imported = null;
+				var importErr = '';
+				try {
+					imported = engine.importConfig(res.content);
+				} catch (e) {
+					importErr = (e && e.message) ? e.message : String(e);
+				}
+
+				if (importErr || !imported || !imported.nodes || !imported.nodes.length) {
 					sub.lastUpdated = Math.floor(Date.now() / 1000);
 					sub.lastStatus = 'error';
-					sub.lastError = imported.error || '未解析到有效节点（已保留旧节点）';
+					sub.lastError = importErr || '未解析到有效节点（已保留旧节点）';
 					return api.saveSubscriptions(JSON.stringify(subs, null, 2)).then(function() {
 						ui.hideModal();
 						notify(false, '订阅「' + sub.name + '」解析失败：' + sub.lastError);
@@ -93,10 +100,17 @@ return view.extend({
 				return Promise.all([
 					api.saveProfile(loaded.name, profile),
 					api.saveSubscriptions(JSON.stringify(subs, null, 2))
-				]).then(function() {
+				]).then(function(saveRes) {
 					ui.hideModal();
-					var warns = (imported.warnings && imported.warnings.length)
-						? ('\n转换提示：\n• ' + imported.warnings.slice(0, 5).join('\n• '))
+					if (!saveRes[0] || !saveRes[0].ok || !saveRes[1] || !saveRes[1].ok) {
+						var errText = (saveRes[0] && saveRes[0].error) || (saveRes[1] && saveRes[1].error) || '写入失败';
+						notify(false, '保存订阅结果失败：' + errText);
+						renderTable();
+						return;
+					}
+					var notes = imported.notes || [];
+					var warns = notes.length
+						? ('\n转换提示：\n• ' + notes.slice(0, 5).join('\n• '))
 						: '';
 					notify(true, '订阅「' + sub.name + '」更新成功：共 ' + merged.total + ' 个节点（保留原 ID ' + merged.kept + ' 个，新增 ' + merged.added + ' 个）' + warns);
 					renderTable();
@@ -112,7 +126,7 @@ return view.extend({
 				return E('div', { 'style': 'margin-bottom:8px;' }, [
 					E('label', { 'style': 'display:block;font-weight:600;margin-bottom:3px;font-size:13px;' }, label),
 					el,
-					desc ? E('div', { 'style': 'font-size:11px;color:#666;margin-top:2px;' }, desc) : ''
+					desc ? E('div', { 'style': 'font-size:11px;opacity:0.75;margin-top:2px;' }, desc) : ''
 				]);
 			};
 
@@ -196,22 +210,22 @@ return view.extend({
 
 			if (!subs.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;color:#666;' }, '暂无订阅，点击「新增订阅」添加。支持 sing-box / Clash / Mihomo / Base64 / SIP008 / 分享链接。')
+					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;opacity:0.7;' }, '暂无订阅，点击「新增订阅」添加。支持 sing-box / Clash / Mihomo / Base64 / SIP008 / 分享链接。')
 				]));
 			} else {
 				subs.forEach(function(sub) {
-					var stColor = sub.lastStatus === 'ok' ? '#16a34a' : (sub.lastStatus === 'error' ? '#dc2626' : '#666');
+					var stColor = sub.lastStatus === 'ok' ? '#16a34a' : (sub.lastStatus === 'error' ? '#dc2626' : '');
 					var stText = sub.lastStatus === 'ok' ? '成功' : (sub.lastStatus === 'error' ? ('失败：' + (sub.lastError || '')) : '未更新');
 					rows.push(E('tr', { 'class': 'tr' }, [
 						E('td', { 'class': 'td' }, [
 							E('strong', {}, sub.name),
-							E('div', { 'style': 'font-size:11px;color:#666;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' }, sub.url)
+							E('div', { 'style': 'font-size:11px;opacity:0.7;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' }, sub.url)
 						]),
 						E('td', { 'class': 'td' }, sub.enabled !== false ? '开启' : '关闭'),
 						E('td', { 'class': 'td' }, sub.lastCount != null ? String(sub.lastCount) : '-'),
 						E('td', { 'class': 'td', 'style': 'font-size:12px;' }, [
 							E('div', {}, formatTime(sub.lastUpdated)),
-							E('div', { 'style': 'color:' + stColor + ';' }, stText)
+							E('div', { 'style': stColor ? ('color:' + stColor + ';') : 'opacity:0.7;' }, stText)
 						]),
 						E('td', { 'class': 'td', 'style': 'white-space:nowrap;' }, [
 							E('button', { 'class': 'btn cbi-button-action', 'click': function() { updateOneInBrowser(sub); } }, '立即更新'),
@@ -221,13 +235,21 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									var prevSubs = subs.slice();
+									var prevNodes = profile.nodes.slice();
 									subs = subs.filter(function(x) { return x.id !== sub.id; });
 									profile.nodes = profile.nodes.filter(function(n) { return n.subId !== sub.id; });
 									Promise.all([
 										api.saveProfile(loaded.name, profile),
 										api.saveSubscriptions(JSON.stringify(subs, null, 2))
-									]).then(function() {
-										notify(true, '已删除订阅「' + sub.name + '」及其关联节点');
+									]).then(function(r) {
+										if (!r[0] || !r[0].ok || !r[1] || !r[1].ok) {
+											subs = prevSubs;
+											profile.nodes = prevNodes;
+											notify(false, '删除保存失败：' + ((r[0] && r[0].error) || (r[1] && r[1].error) || '未知错误'));
+										} else {
+											notify(true, '已删除订阅「' + sub.name + '」及其关联节点');
+										}
 										renderTable();
 									});
 								}
@@ -272,10 +294,18 @@ return view.extend({
 				if (res && res.ok) {
 					notify(true, '后台更新完成：成功 ' + (res.updated ? res.updated.length : 0) + ' 个' + (res.applied ? '，已校验并热应用配置' : ''));
 				} else {
-					notify(false, '后台更新存在失败项：' + JSON.stringify(res));
+					var detail = (res && res.error) ? res.error : JSON.stringify((res && res.failed) || res);
+					notify(false, '后台更新存在失败项：' + detail);
 				}
-				return api.getSubscriptions().then(function(r) {
-					if (r && Array.isArray(r.subscriptions)) subs = r.subscriptions;
+				return Promise.all([
+					api.getSubscriptions(),
+					api.loadActiveProfile()
+				]).then(function(r) {
+					if (r[0] && Array.isArray(r[0].subscriptions)) subs = r[0].subscriptions;
+					if (r[1] && r[1].profile) {
+						loaded = r[1];
+						profile = r[1].profile;
+					}
 					renderTable();
 				});
 			}).catch(function(err) {
@@ -290,9 +320,19 @@ return view.extend({
 			uci.set('singsing', 'subscription', 'auto_apply', autoApplyChk.checked ? '1' : '0');
 			return api.applyUciIfChanged()
 				.then(function() { return api.saveSubscriptions(JSON.stringify(subs, null, 2)); })
-				.then(function() { return api.saveProfile(loaded.name, profile); })
-				.then(function() { return api.syncCron(); })
-				.then(function() { ui.addNotification(null, E('p', '订阅列表与定时设置已保存'), 'info'); });
+				.then(function(r1) {
+					if (!r1 || !r1.ok) throw new Error((r1 && r1.error) || '保存订阅列表失败');
+					return api.saveProfile(loaded.name, profile);
+				})
+				.then(function(r2) {
+					if (!r2 || !r2.ok) throw new Error((r2 && r2.error) || '保存配置方案失败');
+					return api.syncCron();
+				})
+				.then(function(r3) {
+					if (!r3 || !r3.ok) throw new Error((r3 && r3.output) || '同步系统 cron 失败');
+					ui.addNotification(null, E('p', '订阅列表与定时设置已保存'), 'info');
+					return r3;
+				});
 		};
 
 		renderTable();
@@ -332,6 +372,7 @@ return view.extend({
 	},
 
 	handleReset: function() {
+		uci.unload('singsing');
 		window.location.reload();
 	}
 });

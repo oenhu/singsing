@@ -1,4 +1,4 @@
-import { validate as validateUpstream, type Issue } from "../upstream/generate";
+import { nodeObject, tailnetEndpoint, usableGroups, validate as validateUpstream, type Issue } from "../upstream/generate";
 import type { Profile } from "../upstream/types";
 import { parseClientEntries } from "./access";
 import type { DirectDnsType, OpenWrtSettings } from "./types";
@@ -9,16 +9,61 @@ const IFACE_RE = /^[a-zA-Z0-9_-]{1,15}$/;
 const OPENWRT_RESERVED_TAGS = ["dns-in"];
 
 export function isValidIpv4(ip: string): boolean {
-  return IPV4_RE.test(ip);
+  return IPV4_RE.test(ip.trim());
+}
+
+/**
+ * Parse and expand an IPv6 address (including compressed `::` and IPv4-mapped `::ffff:a.b.c.d`)
+ * into 8 16-bit words, or return null if invalid.
+ */
+export function expandIpv6(raw: string): number[] | null {
+  let ip = raw.trim();
+  if (!ip.includes(":")) return null;
+  if ((ip.startsWith(":") && !ip.startsWith("::")) || (ip.endsWith(":") && !ip.endsWith("::"))) {
+    return null;
+  }
+
+  // Handle IPv4-mapped / embedded trailing dotted quad (e.g. ::ffff:127.0.0.1)
+  const lastColon = ip.lastIndexOf(":");
+  const tail = ip.slice(lastColon + 1);
+  if (tail.includes(".")) {
+    if (!IPV4_RE.test(tail)) return null;
+    const octets = tail.split(".").map(Number);
+    const hi = ((octets[0] << 8) | octets[1]).toString(16);
+    const lo = ((octets[2] << 8) | octets[3]).toString(16);
+    ip = `${ip.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+
+  const parseGroups = (seg: string): number[] | null => {
+    if (!seg) return [];
+    const parts = seg.split(":");
+    const nums: number[] = [];
+    for (const p of parts) {
+      if (!/^[0-9a-fA-F]{1,4}$/.test(p)) return null;
+      nums.push(parseInt(p, 16));
+    }
+    return nums;
+  };
+
+  const left = parseGroups(halves[0]);
+  if (!left) return null;
+
+  if (halves.length === 2) {
+    const right = parseGroups(halves[1]);
+    if (!right) return null;
+    if (left.length + right.length > 7) return null;
+    const zeros = new Array<number>(8 - left.length - right.length).fill(0);
+    return [...left, ...zeros, ...right];
+  }
+
+  return left.length === 8 ? left : null;
 }
 
 export function isValidIpv6(ip: string): boolean {
-  if (!ip.includes(":") || !/^[0-9a-fA-F:]+$/.test(ip)) return false;
-  if (ip.split("::").length > 2) return false;
-  const parts = ip.split(":").filter((p) => p.length > 0);
-  if (parts.some((p) => p.length > 4)) return false;
-  if (!ip.includes("::") && ip.split(":").length !== 8) return false;
-  return true;
+  return expandIpv6(ip) !== null;
 }
 
 export function isValidIp(ip: string): boolean {
@@ -26,7 +71,7 @@ export function isValidIp(ip: string): boolean {
 }
 
 export function isValidCidr(cidr: string, version: 4 | 6): boolean {
-  const parts = cidr.split("/");
+  const parts = cidr.trim().split("/");
   if (parts.length !== 2) return false;
   const [addr, prefix] = parts;
   if (!/^\d{1,3}$/.test(prefix)) return false;
@@ -36,11 +81,33 @@ export function isValidCidr(cidr: string, version: 4 | 6): boolean {
 }
 
 export function isLoopbackOrUnspecified(ip: string): boolean {
-  const lower = ip.trim().toLowerCase();
-  if (lower === "0.0.0.0" || lower === "::" || lower === "::1") return true;
-  if (lower.startsWith("127.")) return true;
-  if (/^0+:0*:0*:0*:0*:0*:0*:0*1$/.test(lower)) return true;
+  const trimmed = ip.trim().toLowerCase();
+  if (isValidIpv4(trimmed)) {
+    return trimmed === "0.0.0.0" || trimmed.startsWith("127.");
+  }
+  const v6 = expandIpv6(trimmed);
+  if (!v6) return false;
+  const first5Zero = v6[0] === 0 && v6[1] === 0 && v6[2] === 0 && v6[3] === 0 && v6[4] === 0;
+  // :: (unspecified) or ::1 (loopback)
+  if (first5Zero && v6[5] === 0 && v6[6] === 0 && (v6[7] === 0 || v6[7] === 1)) {
+    return true;
+  }
+  // ::ffff:0.0.0.0 or ::ffff:127.0.0.0/8
+  if (first5Zero && v6[5] === 0xffff) {
+    if (v6[6] === 0 && v6[7] === 0) return true;
+    if ((v6[6] >> 8) === 127) return true;
+  }
   return false;
+}
+
+function sameIp(a: string, b: string): boolean {
+  const ta = a.trim();
+  const tb = b.trim();
+  if (isValidIpv4(ta) && isValidIpv4(tb)) return ta === tb;
+  const va = expandIpv6(ta);
+  const vb = expandIpv6(tb);
+  if (va && vb) return va.every((w, idx) => w === vb[idx]);
+  return ta.toLowerCase() === tb.toLowerCase();
 }
 
 function isValidPort(port: number): boolean {
@@ -68,7 +135,7 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
     err(`直连上游 DNS「${server}」必须是有效的 IPv4 或 IPv6 地址（不可填域名，避免引导解析循环）`);
   } else if (isLoopbackOrUnspecified(server)) {
     err(`直连上游 DNS 不能设为本地回环或未指定地址（${server}），否则会导致 DNS 循环`);
-  } else if (settings.routerLanIps?.some((lanIp) => lanIp.trim().toLowerCase() === server.toLowerCase())) {
+  } else if (settings.routerLanIps?.some((lanIp) => sameIp(lanIp, server))) {
     err(`直连上游 DNS 不能设为路由器自身地址（${server}），否则会导致 dnsmasq 与 sing-box 循环`);
   }
 
@@ -161,6 +228,87 @@ export function validateOpenWrt(profile: Profile, settings: OpenWrtSettings): Is
           id: g.id,
           detail: `标签 ${reserved} 为 OpenWrt 适配层保留，请换一个`,
           message: `代理组「${g.tag}」：标签 ${reserved} 为 OpenWrt 适配层保留，请换一个`,
+        });
+      }
+    }
+    for (const t of profile.settings.tailnets) {
+      if (t.tag === reserved) {
+        issues.push({
+          level: "error",
+          section: "tailscale",
+          id: t.id,
+          detail: `标签 ${reserved} 为 OpenWrt 适配层保留，请换一个`,
+          message: `Tailscale「${t.tag}」：标签 ${reserved} 为 OpenWrt 适配层保留，请换一个`,
+        });
+      }
+    }
+  }
+
+  // Validate Tailscale state_directory path traversal & post-normalization collisions
+  const tsRoot = settings.paths.tailscaleStateRoot.trim().replace(/\/+$/, "");
+  const resolvedStateDirs = new Map<string, string>();
+  for (const t of profile.settings.tailnets) {
+    const { endpoint } = tailnetEndpoint(t);
+    if (!endpoint) continue;
+    const rawDir = typeof endpoint.state_directory === "string" ? endpoint.state_directory.trim() : "tailscale";
+    if (rawDir.split("/").includes("..")) {
+      issues.push({
+        level: "error",
+        section: "tailscale",
+        id: t.id,
+        detail: `state_directory「${rawDir}」不能包含上级目录 ..`,
+        message: `Tailscale「${t.tag}」：state_directory「${rawDir}」不能包含上级目录 ..`,
+      });
+      continue;
+    }
+    const fullDir = rawDir.startsWith("/") ? rawDir.replace(/\/+$/, "") : `${tsRoot}/${rawDir.replace(/^\/+/, "") || t.tag || "tailscale"}`;
+    const prev = resolvedStateDirs.get(fullDir);
+    if (prev && rawDir !== prev) {
+      issues.push({
+        level: "error",
+        section: "tailscale",
+        id: t.id,
+        detail: `状态目录解析后为「${fullDir}」，与另一 Tailnet 冲突`,
+        message: `Tailscale「${t.tag}」：状态目录解析后为「${fullDir}」，与另一 Tailnet 冲突`,
+      });
+    }
+    resolvedStateDirs.set(fullDir, rawDir);
+  }
+
+  // Validate per-device access control outbound targets exist in generated config
+  if (settings.accessControl?.deviceRules?.length) {
+    const validTargets = new Set<string>(["direct", "proxy"]);
+    const outboundIds = new Set<string>();
+    let hasGroupedNode = false;
+    for (const n of profile.nodes) {
+      if (!nodeObject(n).error) {
+        validTargets.add(n.tag);
+        outboundIds.add(n.id);
+        if (n.inGroups) hasGroupedNode = true;
+      }
+    }
+    if (hasGroupedNode) validTargets.add("auto");
+    for (const t of profile.settings.tailnets) {
+      if (tailnetEndpoint(t).endpoint) {
+        validTargets.add(t.tag);
+        outboundIds.add(t.id);
+      }
+    }
+    const usable = usableGroups(profile.groups, outboundIds);
+    for (const g of profile.groups) {
+      if (usable.has(g.id)) validTargets.add(g.tag);
+    }
+
+    for (const dr of settings.accessControl.deviceRules) {
+      if (dr.enabled === false) continue;
+      const out = (dr.outbound || "").trim();
+      if (!out || !validTargets.has(out)) {
+        issues.push({
+          level: "error",
+          section: "routing",
+          id: dr.id,
+          detail: `设备分流规则「${dr.name || "未命名"}」指定的出口「${out || "(空)"}」不存在或为空`,
+          message: `客户端访问控制：设备分流规则「${dr.name || "未命名"}」指定的出口「${out || "(空)"}」不存在或为空`,
         });
       }
     }

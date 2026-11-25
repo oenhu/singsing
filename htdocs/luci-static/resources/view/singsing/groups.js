@@ -14,9 +14,13 @@ return view.extend({
 		var profileName = loaded.name;
 		this._saveFn = function() {
 			return api.saveProfile(profileName, profile).then(function(res) {
-				if (res && res.ok) ui.addNotification(null, E('p', '代理组配置已保存'), 'info');
-				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
-				return res;
+				if (res && res.ok) {
+					ui.addNotification(null, E('p', '代理组配置已保存'), 'info');
+					return res;
+				}
+				var msg = (res && res.error) || '未知错误';
+				ui.addNotification('保存失败', E('p', msg), 'danger');
+				return Promise.reject(new Error(msg));
 			});
 		};
 
@@ -82,17 +86,23 @@ return view.extend({
 				'style': 'width:100%;margin-bottom:6px;'
 			});
 			var membersBox = E('div', {
-				'style': 'max-height:180px;overflow:auto;border:1px solid #ddd;border-radius:4px;padding:8px;background:#fafafa;'
+				'style': 'max-height:180px;overflow:auto;border:1px solid var(--border-color-medium, rgba(127,127,127,0.25));border-radius:4px;padding:8px;background:var(--background-color-high, rgba(127,127,127,0.05));'
 			});
 
 			var defSel = E('select', { 'class': 'cbi-input-select' });
+			var currentDefault = group.defaultMember || '';
+			defSel.addEventListener('change', function() {
+				currentDefault = defSel.value;
+			});
 			var refreshDefaultOptions = function() {
+				if (currentDefault && selectedIds.indexOf(currentDefault) < 0)
+					currentDefault = '';
 				defSel.innerHTML = '';
 				defSel.appendChild(E('option', { 'value': '' }, '（默认第一项）'));
 				selectedIds.forEach(function(id) {
 					defSel.appendChild(E('option', {
 						'value': id,
-						'selected': group.defaultMember === id ? 'selected' : null
+						'selected': currentDefault === id ? 'selected' : null
 					}, memberTagById(id)));
 				});
 			};
@@ -193,6 +203,17 @@ return view.extend({
 							var tag = tagInput.value.trim();
 							if (!tag) {
 								errDiv.textContent = '代理组名称不能为空';
+								return;
+							}
+							if (['proxy', 'auto', 'direct', 'local', 'remote', 'tun-in', 'dns-in'].indexOf(tag) >= 0) {
+								errDiv.textContent = '名称「' + tag + '」为系统保留标签，请换一个';
+								return;
+							}
+							var dup = (profile.groups || []).some(function(x) { return x.id !== group.id && x.tag === tag; }) ||
+								(profile.nodes || []).some(function(n) { return n.tag === tag; }) ||
+								(profile.settings.tailnets || []).some(function(t) { return t.tag === tag; });
+							if (dup) {
+								errDiv.textContent = '名称「' + tag + '」已被其他代理组、节点或 Tailnet 使用';
 								return;
 							}
 							var tolVal = tolInput.value.trim() === '' ? null : parseInt(tolInput.value.trim(), 10);

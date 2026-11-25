@@ -21,7 +21,7 @@ return view.extend({
 		var query = '';
 		var latest = initial;
 
-		var summaryBox = E('div', { 'style': 'margin:10px 0;font-size:13px;color:#333;' });
+		var summaryBox = E('div', { 'style': 'margin:10px 0;font-size:13px;' });
 		var tableWrap = E('div', { 'class': 'cbi-section', 'style': 'margin-top:10px;' });
 
 		var renderData = function(res) {

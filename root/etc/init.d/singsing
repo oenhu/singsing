@@ -7,43 +7,61 @@ STOP=10
 PROG_MGR="/usr/share/singsing/service-manager.sh"
 SB_CONFIG="/etc/sing-box/config.json"
 
+boot() {
+	local auto_start
+	config_load singsing
+	config_get auto_start main auto_start "1"
+	[ "$auto_start" = "1" ] || return 0
+	start "$@"
+}
+
 start_service() {
-	local enabled local_dns bin auto_start
+	local enabled local_dns bin
 
 	config_load singsing
 	config_get enabled main enabled "0"
 	config_get bin main singbox_bin "/usr/bin/sing-box"
 	config_get local_dns dns local_server ""
 
-	[ "$enabled" = "1" ] || return 0
+	if [ "$enabled" != "1" ]; then
+		"$PROG_MGR" dnsmasq_restore
+		return 0
+	fi
 
-	if [ -z "$local_dns" ]; then
-		logger -t singsing -p daemon.err "Refusing to start: direct upstream DNS (dns.local_server) is not configured"
+	if ! "$PROG_MGR" check_local_dns "$local_dns"; then
+		logger -t singsing -p daemon.err "Refusing to start: direct upstream DNS ($local_dns) is missing or invalid"
+		"$PROG_MGR" dnsmasq_restore
 		return 1
 	fi
 
 	if [ ! -x "$bin" ]; then
 		logger -t singsing -p daemon.err "Refusing to start: sing-box binary not found at $bin"
+		"$PROG_MGR" dnsmasq_restore
 		return 1
 	fi
 
 	if [ ! -s "$SB_CONFIG" ]; then
 		logger -t singsing -p daemon.err "Refusing to start: config file $SB_CONFIG does not exist"
+		"$PROG_MGR" dnsmasq_restore
 		return 1
 	fi
 
 	"$PROG_MGR" ensure_dirs
 
-	# Auto-download missing local rule-sets on boot/first start
-	if ! "$PROG_MGR" ensure_rulesets; then
-		logger -t singsing -p daemon.err "Failed to ensure local rule-sets; aborting start"
-		return 1
-	fi
+	if [ "${SINGSING_FROM_APPLY:-0}" != "1" ]; then
+		# Auto-download missing local rule-sets on boot/manual start
+		if ! "$PROG_MGR" ensure_rulesets; then
+			logger -t singsing -p daemon.err "Failed to ensure local rule-sets; aborting start"
+			"$PROG_MGR" dnsmasq_restore
+			return 1
+		fi
 
-	# Always validate before launching
-	if ! "$bin" check -c "$SB_CONFIG" >/dev/null 2>&1; then
-		logger -t singsing -p daemon.err "Config validation failed for $SB_CONFIG; aborting start"
-		return 1
+		# Validate before launching
+		if ! "$bin" check -c "$SB_CONFIG" >/dev/null 2>&1; then
+			logger -t singsing -p daemon.err "Config validation failed for $SB_CONFIG; aborting start"
+			"$PROG_MGR" dnsmasq_restore
+			return 1
+		fi
 	fi
 
 	procd_open_instance "singsing"
@@ -59,12 +77,17 @@ start_service() {
 }
 
 service_started() {
+	[ "${SINGSING_FROM_APPLY:-0}" = "1" ] && return 0
+
 	local enabled
 	config_load singsing
 	config_get enabled main enabled "0"
-	[ "$enabled" = "1" ] || return 0
+	if [ "$enabled" != "1" ]; then
+		"$PROG_MGR" dnsmasq_restore
+		return 0
+	fi
 
-	if "$PROG_MGR" wait_dns_ready 12; then
+	if "$PROG_MGR" wait_dns_ready 10; then
 		"$PROG_MGR" dnsmasq_takeover
 	else
 		logger -t singsing -p daemon.err "sing-box DNS did not become ready in time; skipping dnsmasq takeover"
@@ -76,6 +99,11 @@ stop_service() {
 	"$PROG_MGR" dnsmasq_restore
 }
 
-service_triggers() {
-	procd_add_reload_trigger "singsing"
+service_stopped() {
+	"$PROG_MGR" dnsmasq_restore
+}
+
+reload_service() {
+	stop
+	start
 }

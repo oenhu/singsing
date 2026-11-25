@@ -158,9 +158,13 @@ return view.extend({
 		});
 		this._saveFn = function() {
 			return api.saveProfile(activeName, loaded.profile).then(function(res) {
-				if (res && res.ok) ui.addNotification(null, E('p', '当前配置方案「' + activeName + '」已保存'), 'info');
-				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
-				return res;
+				if (res && res.ok) {
+					ui.addNotification(null, E('p', '当前配置方案「' + activeName + '」已保存'), 'info');
+					return res;
+				}
+				var msg = (res && res.error) || '未知错误';
+				ui.addNotification('保存失败', E('p', msg), 'danger');
+				return Promise.reject(new Error(msg));
 			});
 		};
 

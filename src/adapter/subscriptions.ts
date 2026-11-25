@@ -76,7 +76,18 @@ export function mergeSubscriptionNodes(
 
   // Keep all manual nodes and nodes belonging to other subscriptions
   const preserved = (profile.nodes as ManagedProxyNode[]).filter((n) => n.subId !== sub.id);
-  const usedTags = preserved.map((n) => n.tag);
+  const usedTags = [
+    "proxy",
+    "auto",
+    "direct",
+    "local",
+    "remote",
+    "tun-in",
+    "dns-in",
+    ...preserved.map((n) => n.tag),
+    ...(profile.groups ?? []).map((g) => g.tag),
+    ...(profile.settings?.tailnets ?? []).map((t) => t.tag),
+  ];
   const seenKeys = new Set<string>();
   const prefix = (sub.renamePrefix || "").trimStart();
 

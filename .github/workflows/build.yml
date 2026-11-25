@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test-and-verify:
@@ -70,10 +70,10 @@ jobs:
       matrix:
         include:
           - name: openwrt-24.10-ipk
-            sdk_url: https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            base_url: https://downloads.openwrt.org/releases/24.10.0/targets/x86/64
             ext: ipk
           - name: openwrt-snapshot-apk
-            sdk_url: https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            base_url: https://downloads.openwrt.org/snapshots/targets/x86/64
             ext: apk
     steps:
       - uses: actions/checkout@v4
@@ -92,7 +92,10 @@ jobs:
       - name: Download and extract OpenWrt SDK
         run: |
           mkdir -p /tmp/sdk
-          curl -fsSL "${{ matrix.sdk_url }}" | tar --zstd -xf - --strip-components=1 -C /tmp/sdk
+          SDK_FILE="$(curl -fsSL "${{ matrix.base_url }}/sha256sums" | awk '{gsub(/^\*/, "", $2); if ($2 ~ /^openwrt-sdk-.*\.tar\.zst$/) { print $2; exit }}')"
+          test -n "$SDK_FILE"
+          echo "Downloading ${SDK_FILE} from ${{ matrix.base_url }}..."
+          curl -fsSL "${{ matrix.base_url }}/${SDK_FILE}" | tar --zstd -xf - --strip-components=1 -C /tmp/sdk
 
       - name: Prepare feeds and package source
         run: |
@@ -128,6 +131,8 @@ jobs:
     needs: package-openwrt
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

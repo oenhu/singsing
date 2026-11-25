@@ -94,11 +94,43 @@ describe("Mandatory direct upstream DNS and loop prevention validation", () => {
     expect(issues.some((i) => i.level === "error" && i.detail.includes("路由器自身地址"))).toBe(true);
   });
 
-  it("rejects reserved dns-in tag on user node", () => {
+  it("rejects reserved dns-in tag on user node and tailnet", () => {
     const p = blueprintProfile();
     p.nodes.push(newNode({ tag: "dns-in" }));
     const issues = validateOpenWrt(p, validSettings());
     expect(issues.some((i) => i.level === "error" && i.detail.includes("dns-in"))).toBe(true);
+
+    const p2 = blueprintProfile();
+    p2.settings.tailnets = [newTailnet({ tag: "dns-in" })];
+    const issues2 = validateOpenWrt(p2, validSettings());
+    expect(issues2.some((i) => i.level === "error" && i.section === "tailscale" && i.detail.includes("dns-in"))).toBe(true);
+  });
+
+  it("strictly validates malformed IPv6, expanded loopback/unspecified, and canonical IPv6 LAN IP", () => {
+    for (const bad of [":::", "1:2:3:4:5:6:7:", ":1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8::9"]) {
+      const issues = validateOpenWrt(
+        blueprintProfile(),
+        validSettings({ dns: { ...defaultOpenWrtSettings().dns, localServer: bad } }),
+      );
+      expect(issues.some((i) => i.level === "error" && i.detail.includes("IPv4 或 IPv6"))).toBe(true);
+    }
+
+    for (const loop of ["0::1", "0:0:0:0:0:0:0:0", "::ffff:127.0.0.1"]) {
+      const issues = validateOpenWrt(
+        blueprintProfile(),
+        validSettings({ dns: { ...defaultOpenWrtSettings().dns, localServer: loop } }),
+      );
+      expect(issues.some((i) => i.level === "error" && i.detail.includes("回环"))).toBe(true);
+    }
+
+    const lanV6Issues = validateOpenWrt(
+      blueprintProfile(),
+      validSettings({
+        dns: { ...defaultOpenWrtSettings().dns, localServer: "fd00:0000:0000:0000:0000:0000:0000:0001" },
+        routerLanIps: ["fd00::1"],
+      }),
+    );
+    expect(lanV6Issues.some((i) => i.level === "error" && i.detail.includes("路由器自身地址"))).toBe(true);
   });
 });
 
@@ -119,8 +151,8 @@ describe("DNS adaptation, LAN leak prevention, and upstream policy preservation"
     expect(config.dns.rules.some((r: any) => r.preferred_by === "local")).toBe(false);
   });
 
-  it("returns NXDOMAIN for .lan / .home.arpa / localhost instead of leaking to external direct DNS", () => {
-    for (const domain of ["nas.lan", "printer.home.arpa", "localhost"]) {
+  it("returns NXDOMAIN for .lan / .home.arpa / localhost / bare lan / single-label hostnames instead of leaking to external direct DNS", () => {
+    for (const domain of ["nas.lan", "printer.home.arpa", "localhost", "lan", "home.arpa", "nas", "openwrt"]) {
       const res = walk(config.dns.rules, { domain, qtype: "A", mode: "GFWList", publicV6Iface: true });
       expect(res.final).toBe("predefined:NXDOMAIN");
     }
@@ -193,6 +225,10 @@ describe("TUN, localized rule-sets, and flash-friendly paths", () => {
     expect(tun1.address).toEqual(["172.19.0.1/30"]);
     expect(tun1.dns_mode).toBe("disabled");
     expect(tun1.mtu).toBe(1400);
+    // When hijack=false, only dns-in hijack-dns remains in route.rules (no port-53 client hijack)
+    expect(r1.route.rules.filter((r: any) => r.action === "hijack-dns")).toEqual([
+      { inbound: "dns-in", action: "hijack-dns" },
+    ]);
 
     const s2 = validSettings({ tun: { ...defaultOpenWrtSettings().tun, enabled: false } });
     const r2 = generateOpenWrtConfig(blueprintProfile(), s2).config as any;
@@ -351,6 +387,14 @@ describe("Subscription merge, filtering, deduplication, and stable node IDs", ()
     expect(r2.added).toBe(1);
     const updatedHk = r2.nodes.find((n) => n.tag === "[A] HK 01 Renamed")!;
     expect(updatedHk.id).toBe(addedHk.id);
+
+    // Disambiguates reserved tags like "direct" or "dns-in"
+    const subNoPrefix = { ...baseSub, id: "sub-b", renamePrefix: "" };
+    const r3 = mergeSubscriptionNodes(p, subNoPrefix, [
+      newNode({ id: "id-dir", tag: "direct", body: JSON.stringify({ type: "trojan", server: "d.example.com", server_port: 443, password: "p4" }) }),
+    ]);
+    const dirNode = r3.nodes.find((n) => n.subId === "sub-b")!;
+    expect(dirNode.tag).not.toBe("direct");
   });
 });
 
@@ -400,15 +444,44 @@ describe("Client access control (LAN device steering) schema and rules", () => {
     expect(ok).toBe(true);
   });
 
-  it("rejects invalid client IP/MAC entries in validation", () => {
+  it("rejects invalid client IP/MAC entries and nonexistent deviceRule outbounds in validation", () => {
     const s = validSettings({
       accessControl: {
         mode: "blocklist",
         clients: ["not-an-ip-or-mac"],
-        deviceRules: [],
+        deviceRules: [
+          { id: "d-bad", name: "Ghost Group", clients: ["192.168.6.99"], outbound: "deleted-group", enabled: true },
+        ],
       },
     });
     const issues = validateOpenWrt(blueprintProfile(), s);
     expect(issues.some((i) => i.level === "error" && i.detail.includes("访问控制设备列表格式无效"))).toBe(true);
+    expect(issues.some((i) => i.level === "error" && i.detail.includes("deleted-group"))).toBe(true);
+  });
+
+  it("handles empty allowlist (routes tun-in direct), places deviceRules before allowlist, and skips tun-in when tun disabled", () => {
+    const emptyAllow = validSettings({
+      accessControl: {
+        mode: "allowlist",
+        clients: [],
+        deviceRules: [
+          { id: "d1", name: "VIP TV", clients: ["192.168.6.88"], outbound: "proxy", enabled: true },
+        ],
+      },
+    });
+    const { config } = generateOpenWrtConfig(blueprintProfile(), emptyAllow) as any;
+    expect(validateSchema(config)).toBe(true);
+    const rules = config.route.rules as any[];
+    const devIdx = rules.findIndex((r) => Array.isArray(r.source_ip_cidr) && r.source_ip_cidr.includes("192.168.6.88/32"));
+    const allowIdx = rules.findIndex((r) => r.inbound === "tun-in" && r.outbound === "direct");
+    expect(devIdx).toBeGreaterThan(-1);
+    expect(allowIdx).toBeGreaterThan(devIdx);
+
+    const tunOffAllow = validSettings({
+      tun: { ...defaultOpenWrtSettings().tun, enabled: false },
+      accessControl: { mode: "allowlist", clients: ["192.168.6.100"], deviceRules: [] },
+    });
+    const { config: cfgNoTun } = generateOpenWrtConfig(blueprintProfile(), tunOffAllow) as any;
+    expect(JSON.stringify(cfgNoTun.route.rules)).not.toContain("tun-in");
   });
 });

@@ -4,7 +4,7 @@
 // Zero-dependency OpenWrt background subscription updater for luci-app-singsing.
 // Runs directly on OpenWrt 24.10 & 25.12 built-in ucode (no QuickJS / Node.js / Python / Lua).
 
-import { readfile, writefile, stat, popen, chmod } from 'fs';
+import { readfile, writefile, stat, unlink, rename, popen, chmod } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_DIR = '/etc/singsing';
@@ -12,12 +12,27 @@ const PROFILES_DIR = `${CONF_DIR}/profiles`;
 const SUBS_FILE = `${CONF_DIR}/subscriptions.json`;
 const SB_CONFIG = '/etc/sing-box/config.json';
 const TMP_NEW_CONFIG = '/tmp/singsing/config.new.json';
+const SUB_LOCK = '/tmp/singsing/sub-updater.lock';
 const SERVICE_MGR = '/usr/share/singsing/service-manager.sh';
 
+const ENDPOINT_TYPES = { wireguard: true, openconnect: true, 'openvpn-client': true };
+const RESERVED_TAGS = { proxy: true, auto: true, direct: true, local: true, remote: true, 'tun-in': true, 'dns-in': true };
+
+let tmpSeq = 0;
+
 function writeFileSafe(path, data, mode) {
-	let n = writefile(path, data);
-	if (n == null) return false;
-	if (mode != null) chmod(path, mode);
+	let payload = (type(data) == 'string') ? data : ('' + (data ?? ''));
+	let tmp = `${path}.tmp.${time()}.${++tmpSeq}`;
+	let n = writefile(tmp, payload);
+	if (n == null || n != length(payload)) {
+		unlink(tmp);
+		return false;
+	}
+	if (mode != null) chmod(tmp, mode);
+	if (!rename(tmp, path)) {
+		unlink(tmp);
+		return false;
+	}
 	return true;
 }
 
@@ -77,11 +92,12 @@ function parseQuery(qs) {
 }
 
 function parseShareLink(line) {
-	let m = match(line, /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^#]*)(?:#(.*))?$/);
+	// Standard POSIX ERE capturing group (no (?:...) which crashes ucode regcomp!)
+	let m = match(line, /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^#]*)(#(.*))?$/);
 	if (!m) return null;
 	let scheme = lc(m[1]);
 	let rest = m[2];
-	let frag = trim(urlDecode(m[3] || ''));
+	let frag = trim(urlDecode(m[4] || ''));
 
 	// VMess base64 JSON format
 	if (scheme == 'vmess') {
@@ -136,7 +152,7 @@ function parseShareLink(line) {
 		}
 		let ci = index(user, ':');
 		if (ci < 0) return null;
-		let hm = match(hp, /^\[([^\]]+)\]:(\d+)$/) || match(hp, /^([^:]+):(\d+)$/);
+		let hm = match(hp, /^\[([^\]]+)\]:([0-9]+)$/) || match(hp, /^([^:]+):([0-9]+)$/);
 		if (!hm) return null;
 		return {
 			tag: frag || `${hm[1]}:${hm[2]}`,
@@ -154,7 +170,7 @@ function parseShareLink(line) {
 	if (at < 0) return null;
 	let user = urlDecode(substr(body, 0, at));
 	let hp = substr(body, at + 1);
-	let hm = match(hp, /^\[([^\]]+)\]:(\d+)$/) || match(hp, /^([^:]+):(\d+)$/);
+	let hm = match(hp, /^\[([^\]]+)\]:([0-9]+)$/) || match(hp, /^([^:]+):([0-9]+)$/);
 	if (!hm) return null;
 	let host = hm[1], port = int(hm[2]);
 	let tag = frag || `${host}:${port}`;
@@ -252,13 +268,20 @@ function parseSubscriptionText(raw) {
 	if (substr(text, 0, 1) == '{') {
 		let parsed = json(text);
 		if (type(parsed) == 'object') {
-			if (type(parsed.outbounds) == 'array') {
+			if (type(parsed.outbounds) == 'array' || type(parsed.endpoints) == 'array') {
 				let skip = { direct: true, block: true, dns: true, selector: true, urltest: true };
-				for (let o in parsed.outbounds) {
+				for (let o in (parsed.outbounds || [])) {
 					if (type(o) == 'object' && o.type && !skip[o.type] && o.tag) {
 						let copy = {};
 						for (let k, v in o) if (k != 'tag') copy[k] = v;
 						push(nodes, { tag: toStr(o.tag), object: copy });
+					}
+				}
+				for (let ep in (parsed.endpoints || [])) {
+					if (type(ep) == 'object' && ENDPOINT_TYPES[ep.type] && ep.tag) {
+						let copy = {};
+						for (let k, v in ep) if (k != 'tag') copy[k] = v;
+						push(nodes, { tag: toStr(ep.tag), object: copy });
 					}
 				}
 				return nodes;
@@ -302,12 +325,15 @@ function parseSubscriptionText(raw) {
 }
 
 function downloadSub(sub) {
+	let u = trim(toStr(sub.url || ''));
+	if (!match(u, /^https?:\/\/[^[:space:]]+$/))
+		return { code: 1, output: 'Invalid URL' };
 	let ua = sub.userAgent && length(trim(sub.userAgent)) > 0 ? trim(sub.userAgent) : 'sing-box/1.14';
 	let cmd = '';
 	if (runCmd('command -v curl').code == 0) {
-		cmd = `curl -fsSL --connect-timeout 15 --max-time 60 -A ${shellQuote(ua)} ${shellQuote(sub.url)}`;
+		cmd = `curl -fsSL --proto '=http,https' --proto-redir '=http,https' --max-filesize 8388608 --connect-timeout 10 --max-time 25 -A ${shellQuote(ua)} ${shellQuote(u)}`;
 	} else {
-		cmd = `uclient-fetch -q -T 30 -U ${shellQuote(ua)} -O - ${shellQuote(sub.url)}`;
+		cmd = `uclient-fetch -q -T 20 -U ${shellQuote(ua)} -O - ${shellQuote(u)}`;
 	}
 	return runCmd(cmd);
 }
@@ -324,7 +350,7 @@ function splitKw(raw) {
 
 function freshTag(base, used) {
 	if (!used[base]) return base;
-	for (let i = 2; i < 9999; i++) {
+	for (let i = 1; i < 9999; i++) {
 		let cand = `${base}-${i}`;
 		if (!used[cand]) return cand;
 	}
@@ -342,6 +368,9 @@ function mergeIntoProfile(profile, sub, parsedNodes) {
 	let idByKey = {}, idByTag = {};
 	let preserved = [];
 	let usedTags = {};
+	for (let k, v in RESERVED_TAGS) if (v) usedTags[k] = true;
+	for (let g in (profile.groups || [])) if (g.tag) usedTags[g.tag] = true;
+	for (let t in (profile.settings?.tailnets || [])) if (t.tag) usedTags[t.tag] = true;
 
 	for (let n in (profile.nodes || [])) {
 		if (n.subId == sub.id) {
@@ -391,11 +420,14 @@ function mergeIntoProfile(profile, sub, parsedNodes) {
 		});
 	}
 
+	// Never wipe existing subscription nodes if filtering produced 0 nodes
+	if (length(mergedSub) == 0) return 0;
+
 	profile.nodes = [...preserved, ...mergedSub];
 	return length(mergedSub);
 }
 
-// Incrementally patch outbounds in existing /etc/sing-box/config.json from updated profile
+// Incrementally patch outbounds & endpoints in existing /etc/sing-box/config.json from updated profile
 function patchRunningConfig(profile) {
 	let raw = readfile(SB_CONFIG);
 	if (!raw) return false;
@@ -403,6 +435,7 @@ function patchRunningConfig(profile) {
 	if (type(cfg) != 'object' || type(cfg.outbounds) != 'array') return false;
 
 	let nodeObjs = [];
+	let nodeEndpoints = [];
 	let idToTag = {};
 	let groupedTags = [];
 
@@ -412,7 +445,11 @@ function patchRunningConfig(profile) {
 		let obj = { type: body.type, tag: n.tag };
 		for (let k, v in body) if (k != 'type' && k != 'tag') obj[k] = v;
 		if (!('domain_resolver' in obj)) obj.domain_resolver = 'local';
-		push(nodeObjs, obj);
+		if (ENDPOINT_TYPES[body.type]) {
+			push(nodeEndpoints, obj);
+		} else {
+			push(nodeObjs, obj);
+		}
 		idToTag[n.id] = n.tag;
 		if (n.inGroups !== false) push(groupedTags, n.tag);
 	}
@@ -424,14 +461,31 @@ function patchRunningConfig(profile) {
 		if (t.asProxy) push(viaTailnet, t.tag);
 	}
 
+	// Fixed-point resolution for nested groups (matches upstream usableGroups)
+	let usable = {};
+	for (let changed = true; changed; ) {
+		changed = false;
+		for (let g in (profile.groups || [])) {
+			if (usable[g.id]) continue;
+			for (let mid in (g.members || [])) {
+				if (mid != g.id && (idToTag[mid] || usable[mid])) {
+					usable[g.id] = true;
+					idToTag[g.id] = g.tag;
+					changed = true;
+					break;
+				}
+			}
+		}
+	}
+
 	let groupObjs = [];
 	for (let g in (profile.groups || [])) {
+		if (!usable[g.id]) continue;
 		let members = [];
 		for (let mid in (g.members || [])) {
-			if (idToTag[mid]) push(members, idToTag[mid]);
+			if (mid != g.id && idToTag[mid]) push(members, idToTag[mid]);
 		}
 		if (length(members) == 0) continue;
-		idToTag[g.id] = g.tag;
 		if (g.type == 'urltest') {
 			push(groupObjs, {
 				type: 'urltest',
@@ -444,7 +498,8 @@ function patchRunningConfig(profile) {
 			});
 		} else {
 			let go = { type: 'selector', tag: g.tag, outbounds: members };
-			if (g.defaultMember && idToTag[g.defaultMember]) go.default = idToTag[g.defaultMember];
+			if (g.defaultMember && index(g.members || [], g.defaultMember) >= 0 && idToTag[g.defaultMember])
+				go.default = idToTag[g.defaultMember];
 			push(groupObjs, go);
 		}
 	}
@@ -457,7 +512,21 @@ function patchRunningConfig(profile) {
 
 	let proxyDefault = 'auto';
 	let defId = profile.settings?.proxyDefault || 'auto';
-	if (defId != 'auto' && idToTag[defId]) proxyDefault = idToTag[defId];
+	if (defId != 'auto' && idToTag[defId] && index(proxyOutbounds, idToTag[defId]) >= 0) {
+		proxyDefault = idToTag[defId];
+	}
+
+	// Preserve existing Tailscale endpoints while updating node endpoints
+	let existingTsEndpoints = [];
+	for (let ep in (cfg.endpoints || [])) {
+		if (type(ep) == 'object' && ep.type == 'tailscale')
+			push(existingTsEndpoints, ep);
+	}
+	let allEndpoints = [...existingTsEndpoints, ...nodeEndpoints];
+	if (length(allEndpoints) > 0)
+		cfg.endpoints = allEndpoints;
+	else
+		delete cfg.endpoints;
 
 	cfg.outbounds = [
 		{ type: 'selector', tag: 'proxy', outbounds: proxyOutbounds, default: proxyDefault },
@@ -480,15 +549,28 @@ function patchRunningConfig(profile) {
 }
 
 // --- Main CLI ---
+runCmd(`${SERVICE_MGR} ensure_dirs`);
+if (stat(SUB_LOCK)) {
+	let st = stat(SUB_LOCK);
+	if (st && (time() - st.mtime) < 180) {
+		print(sprintf('%J\n', { ok: false, updated: [], failed: [], error: '另一个订阅更新任务正在运行中' }));
+		exit(1);
+	}
+}
+writefile(SUB_LOCK, '' + time());
+
 let targetId = ARGV[0] || '';
 let c = cursor();
 c.load('singsing');
 let activeName = c.get('singsing', 'main', 'active_profile') || 'default';
+if (!match(activeName, /^[a-zA-Z0-9_-]{1,64}$/)) activeName = 'default';
 let autoApply = c.get('singsing', 'subscription', 'auto_apply') == '1';
+let serviceEnabled = c.get('singsing', 'main', 'enabled') == '1';
 
 let subsRaw = readfile(SUBS_FILE);
 let subs = subsRaw ? json(subsRaw) : [];
 if (type(subs) != 'array' || length(subs) == 0) {
+	unlink(SUB_LOCK);
 	print(sprintf('%J\n', { ok: true, updated: [], failed: [], message: '没有已配置的订阅' }));
 	exit(0);
 }
@@ -497,6 +579,7 @@ let profPath = `${PROFILES_DIR}/${activeName}.json`;
 let profRaw = readfile(profPath);
 let profile = profRaw ? json(profRaw) : null;
 if (type(profile) != 'object' || type(profile.nodes) != 'array') {
+	unlink(SUB_LOCK);
 	print(sprintf('%J\n', { ok: false, error: `无法读取当前配置方案 ${activeName}` }));
 	exit(1);
 }
@@ -525,6 +608,14 @@ for (let sub in subs) {
 	}
 
 	let count = mergeIntoProfile(profile, sub, parsed);
+	if (count == 0) {
+		sub.lastUpdated = time();
+		sub.lastStatus = 'error';
+		sub.lastError = '过滤后剩余 0 个节点（已保留旧节点防止清空）';
+		push(failed, { id: sub.id, name: sub.name, error: sub.lastError });
+		continue;
+	}
+
 	sub.lastUpdated = time();
 	sub.lastStatus = 'ok';
 	sub.lastError = '';
@@ -538,7 +629,7 @@ if (length(updated) > 0) {
 }
 
 let applied = false, applyError = '';
-if (length(updated) > 0 && autoApply && stat(SB_CONFIG)) {
+if (length(updated) > 0 && autoApply && serviceEnabled && stat(SB_CONFIG)) {
 	if (patchRunningConfig(profile)) {
 		let ap = runCmd(`${SERVICE_MGR} apply_config`);
 		applied = (ap.code == 0);
@@ -546,6 +637,7 @@ if (length(updated) > 0 && autoApply && stat(SB_CONFIG)) {
 	}
 }
 
+unlink(SUB_LOCK);
 print(sprintf('%J\n', {
 	ok: length(failed) == 0,
 	updated: updated,

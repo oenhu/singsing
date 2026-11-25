@@ -78,14 +78,26 @@ export function adaptAccessControl(config: Json, settings: OpenWrtSettings): voi
 
   const injected: Json[] = [];
 
-  // 1. Global allowlist / blocklist mode
+  // 1. Per-device outbound overrides first so explicit device rules take priority over global mode
+  for (const dr of ac.deviceRules || []) {
+    if (dr.enabled === false) continue;
+    const out = (dr.outbound || "").trim();
+    if (!out) continue;
+    const parsed = parseClientEntries(dr.clients || []);
+    const m = buildClientMatch(parsed.cidrs, parsed.macs, false);
+    if (m) {
+      injected.push({ ...m, action: "route", outbound: out });
+    }
+  }
+
+  // 2. Global allowlist / blocklist mode
   if (ac.mode === "blocklist") {
     const parsed = parseClientEntries(ac.clients || []);
     const m = buildClientMatch(parsed.cidrs, parsed.macs, false);
     if (m) {
       injected.push({ ...m, action: "route", outbound: "direct" });
     }
-  } else if (ac.mode === "allowlist") {
+  } else if (ac.mode === "allowlist" && settings.tun.enabled) {
     const parsed = parseClientEntries(ac.clients || []);
     const m = buildClientMatch(parsed.cidrs, parsed.macs, true);
     if (m) {
@@ -96,18 +108,13 @@ export function adaptAccessControl(config: Json, settings: OpenWrtSettings): voi
         action: "route",
         outbound: "direct",
       });
-    }
-  }
-
-  // 2. Per-device outbound overrides
-  for (const dr of ac.deviceRules || []) {
-    if (dr.enabled === false) continue;
-    const out = (dr.outbound || "").trim();
-    if (!out) continue;
-    const parsed = parseClientEntries(dr.clients || []);
-    const m = buildClientMatch(parsed.cidrs, parsed.macs, false);
-    if (m) {
-      injected.push({ ...m, action: "route", outbound: out });
+    } else {
+      // Empty allowlist: all TUN client traffic goes direct (matches validation warning)
+      injected.push({
+        inbound: "tun-in",
+        action: "route",
+        outbound: "direct",
+      });
     }
   }
 

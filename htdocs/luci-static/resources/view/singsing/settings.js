@@ -19,6 +19,9 @@ return view.extend({
 		var engine = loaded.engine;
 		var m, s, o;
 
+		this._loaded = loaded;
+		this._profile = profile;
+
 		m = new form.Map('singsing', '基本设置',
 			'统一配置 sing-box 核心运行参数、直连与代理 DNS（必填直连上游 DNS，局域网域名由 dnsmasq 直接解析），以及原生 TUN + Auto Redirect 透明代理。');
 		this._map = m;
@@ -44,15 +47,16 @@ return view.extend({
 		};
 		o.write = function(section_id, value) {
 			profile.settings.defaultMode = value;
-			return api.saveProfile(loaded.name, profile);
 		};
 		o.remove = function() {};
 
-		o = s.option(form.Flag, 'auto_start', '开机自启');
+		o = s.option(form.Flag, 'auto_start', '开机自启', '路由器启动时自动运行 sing-box（需同时开启「启用服务」）');
 		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.Flag, 'auto_rollback', '启动失败自动回滚', '新配置启动或健康检查失败时自动恢复上一次有效配置并保护 dnsmasq');
 		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.ListValue, 'log_level', '日志级别');
 		o.value('debug', 'debug');
@@ -95,7 +99,7 @@ return view.extend({
 		o.placeholder = '例如 223.5.5.5';
 		o.rmempty = false;
 
-		o = s.taboption('direct', form.Value, 'local_port', '上游 DNS 端口');
+		o = s.taboption('direct', form.Value, 'local_port', '上游 DNS 端口', 'UDP / TCP 标准端口为 53，DoT 为 853，DoH 为 443');
 		o.datatype = 'port';
 		o.default = '53';
 
@@ -116,11 +120,13 @@ return view.extend({
 		o.default = '5335';
 		o.rmempty = false;
 
-		o = s.taboption('local', form.Flag, 'dnsmasq_manage', '自动接管并恢复 dnsmasq 上游', '启动时仅接管上游转发字段并保留 DHCP/本地域名，停止或异常时自动还原');
+		o = s.taboption('local', form.Flag, 'dnsmasq_manage', '自动接管并恢复 dnsmasq 上游', '启动时仅写内存盘 drop-in 接管上游转发并保留 DHCP/本地域名，停止或异常时自动还原');
 		o.default = '1';
+		o.rmempty = false;
 
-		o = s.taboption('local', form.Flag, 'hijack', '接管局域网客户端外部 53 端口 DNS', '启用 sing-box 原生 TUN dns_mode: hijack');
+		o = s.taboption('local', form.Flag, 'hijack', '接管局域网客户端外部 53 端口 DNS', '启用 sing-box 原生 TUN dns_mode: hijack 与 53 端口路由接管');
 		o.default = '1';
+		o.rmempty = false;
 
 		o = s.taboption('remote', form.ListValue, '_remote_provider', '代理 DNS 服务商');
 		o.value('google', 'Google (8.8.8.8)');
@@ -132,7 +138,6 @@ return view.extend({
 		};
 		o.write = function(section_id, value) {
 			profile.settings.remoteDns.provider = value;
-			return api.saveProfile(loaded.name, profile);
 		};
 		o.remove = function() {};
 
@@ -147,7 +152,6 @@ return view.extend({
 		};
 		o.write = function(section_id, value) {
 			profile.settings.remoteDns.protocol = value;
-			return api.saveProfile(loaded.name, profile);
 		};
 		o.remove = function() {};
 
@@ -159,20 +163,21 @@ return view.extend({
 		};
 		o.write = function(section_id, value) {
 			profile.settings.remoteDns.custom = value || '';
-			return api.saveProfile(loaded.name, profile);
 		};
 		o.remove = function() {};
 
 		o = s.taboption('remote', form.Value, '_client_subnet', 'EDNS Client Subnet（可选）', '发送给代理 DNS 的 ECS 网段，留空则禁用');
 		o.placeholder = '例如 1.2.3.0/24';
+		o.rmempty = false;
 		o.cfgvalue = function() {
 			return profile.settings.clientSubnet || '';
 		};
 		o.write = function(section_id, value) {
 			profile.settings.clientSubnet = (value || '').trim();
-			return api.saveProfile(loaded.name, profile);
 		};
-		o.remove = function() {};
+		o.remove = function() {
+			profile.settings.clientSubnet = '';
+		};
 
 		// ---------------------------------------------------------------
 		// 3. 透明代理（TUN + Auto Redirect）
@@ -192,6 +197,7 @@ return view.extend({
 
 		o = s.option(form.Flag, 'ipv6', '启用 IPv6 接管', '保留原项目精细化 IPv6 DNS 策略，同时通过 TUN 接管客户端直连 IPv6 流量');
 		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'address_v6', 'TUN IPv6 网段');
 		o.default = 'fdfe:dcba:9876::1/126';
@@ -199,12 +205,15 @@ return view.extend({
 
 		o = s.option(form.Flag, 'auto_route', 'Auto Route', '自动配置系统路由表');
 		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.Flag, 'auto_redirect', 'Auto Redirect', '使用 sing-box 原生 nftables 规则自动重定向流量（需同时开启 Auto Route）');
 		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.Flag, 'strict_route', 'Strict Route');
 		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'mtu', 'MTU（可选）', '留空使用 sing-box 核心默认值');
 		o.datatype = 'range(576,65535)';
@@ -219,7 +228,7 @@ return view.extend({
 			var notify = function(ok, text) {
 				msgBox.innerHTML = '';
 				msgBox.appendChild(E('div', {
-					'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';'
+					'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#166534' : '#991b1b') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';'
 				}, text));
 			};
 
@@ -284,6 +293,11 @@ return view.extend({
 						E('button', {
 							'class': 'btn cbi-button-action',
 							'click': function() {
+								var cleanLines = linesArea.value.split('\n').map(function(l) { return l.trim(); }).filter(Boolean);
+								if (!cleanLines.length) {
+									errDiv.textContent = '请至少填写一条匹配域名';
+									return;
+								}
 								var parsed = engine.parseDomainList(linesArea.value);
 								if (parsed.invalid.length) {
 									errDiv.textContent = '域名格式有误：' + parsed.invalid.map(function(x) { return x.entry + '（' + x.reason + '）'; }).join('、');
@@ -300,7 +314,7 @@ return view.extend({
 									server: srvSel.value,
 									tailnet: srvSel.value === 'tailnet' ? tsSel.value : '',
 									custom: customArea.value,
-									lines: linesArea.value.split('\n').map(function(l) { return l.trim(); }).filter(Boolean)
+									lines: cleanLines
 								});
 								if (isNew) {
 									profile.settings.dnsRules.push(draft);
@@ -328,7 +342,7 @@ return view.extend({
 				];
 				if (!rules.length) {
 					rows.push(E('tr', { 'class': 'tr' }, [
-						E('td', { 'class': 'td', 'colspan': '4', 'style': 'text-align:center;color:#666;' }, '暂无自定义 DNS 分域规则（优先级高于默认分流 DNS 策略）。')
+						E('td', { 'class': 'td', 'colspan': '4', 'style': 'text-align:center;opacity:0.7;' }, '暂无自定义 DNS 分域规则（优先级高于默认分流 DNS 策略）。')
 					]));
 				} else {
 					rules.forEach(function(r, idx) {
@@ -372,25 +386,35 @@ return view.extend({
 		});
 	},
 
-	handleSave: function() {
+	_persistAll: function() {
+		var self = this;
 		if (!this._map) return Promise.resolve();
 		return this._map.save().then(function() {
-			return uci.save();
-		}).then(function() {
+			return Promise.all([
+				api.applyUciIfChanged(),
+				api.saveProfile(self._loaded.name, self._profile)
+			]);
+		}).then(function(res) {
+			if (!res[1] || !res[1].ok)
+				throw new Error((res[1] && res[1].error) || '保存 Profile 失败');
+			return res;
+		});
+	},
+
+	handleSave: function() {
+		return this._persistAll().then(function() {
 			ui.addNotification(null, E('p', '基本设置已保存'), 'info');
 		});
 	},
 
 	handleSaveApply: function() {
-		if (!this._map) return Promise.resolve();
-		return this._map.save().then(function() {
-			return api.applyUciIfChanged();
-		}).then(function() {
+		return this._persistAll().then(function() {
 			return api.applyWithNotify();
 		});
 	},
 
 	handleReset: function() {
+		uci.unload('singsing');
 		window.location.reload();
 	}
 });

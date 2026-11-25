@@ -31,9 +31,13 @@ return view.extend({
 		var profileName = loaded.name;
 		this._saveFn = function() {
 			return api.saveProfile(profileName, profile).then(function(res) {
-				if (res && res.ok) ui.addNotification(null, E('p', 'Tailscale 配置已保存'), 'info');
-				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
-				return res;
+				if (res && res.ok) {
+					ui.addNotification(null, E('p', 'Tailscale 配置已保存'), 'info');
+					return res;
+				}
+				var msg = (res && res.error) || '未知错误';
+				ui.addNotification('保存失败', E('p', msg), 'danger');
+				return Promise.reject(new Error(msg));
 			});
 		};
 
@@ -154,8 +158,8 @@ return view.extend({
 					field('控制服务器类型', serverModeSel),
 					controlUrlWrap,
 					field('预授权密钥 (auth_key，可选)', authKeyInput, '填写后可自动登录无需手动点链接；留空则首次启动后在「运行日志」查看授权 URL'),
-					field('状态目录名 (state_directory)', stateDirInput, '每个 Tailnet 需独立目录，将自动持久化保存到 /etc/sing-box/tailscale/ 下'),
-					E('div', { 'style': 'margin:10px 0;padding:8px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:4px;' }, [
+					field('状态目录名 (state_directory)', stateDirInput, '每个 Tailnet 需独立目录，相对路径将自动持久化保存到配置的 Tailscale 状态根目录下'),
+					E('div', { 'style': 'margin:10px 0;padding:8px 10px;background:var(--background-color-high, rgba(127,127,127,0.05));border:1px solid var(--border-color-medium, rgba(127,127,127,0.25));border-radius:4px;' }, [
 						E('div', { 'style': 'font-weight:600;font-size:13px;margin-bottom:6px;' }, 'DNS 与路由开关'),
 						E('div', { 'style': 'display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;' }, [
 							E('label', {}, [magicChk, ' 启用 MagicDNS / Split DNS']),
@@ -194,6 +198,19 @@ return view.extend({
 								errDiv.textContent = '额外路由格式有误：' + rCheck.invalid.map(function(x) { return x.entry + '（' + x.reason + '）'; }).join('、');
 								return;
 							}
+							var stateDirVal = stateDirInput.value.trim() || ('tailscale-' + tag);
+							if (stateDirVal.split('/').indexOf('..') >= 0) {
+								errDiv.textContent = '状态目录名不能包含上级目录 ..';
+								return;
+							}
+							var advRoutes = parseLinesOrCsv(advRoutesInput.value);
+							var badAdv = advRoutes.filter(function(r) {
+								return !engine.isValidCidr(r, 4) && !engine.isValidCidr(r, 6);
+							});
+							if (badAdv.length) {
+								errDiv.textContent = '通告本地子网路由必须是有效的 CIDR 网段（如 192.168.6.0/24）：' + badAdv.join('、');
+								return;
+							}
 
 							// Preserve any extra custom fields from existing endpoint JSON while updating form fields
 							var nextEp = Object.assign({}, ep);
@@ -201,7 +218,7 @@ return view.extend({
 							delete nextEp.tag;
 							delete nextEp.exit_node;
 
-							nextEp.state_directory = stateDirInput.value.trim() || ('tailscale-' + tag);
+							nextEp.state_directory = stateDirVal;
 							var host = hostnameInput.value.trim();
 							if (host) nextEp.hostname = host; else delete nextEp.hostname;
 
@@ -215,7 +232,6 @@ return view.extend({
 							if (allowLanChk.checked) nextEp.exit_node_allow_lan_access = true; else delete nextEp.exit_node_allow_lan_access;
 							if (ephemeralChk.checked) nextEp.ephemeral = true; else delete nextEp.ephemeral;
 
-							var advRoutes = parseLinesOrCsv(advRoutesInput.value);
 							if (advRoutes.length) nextEp.advertise_routes = advRoutes; else delete nextEp.advertise_routes;
 
 							var advTags = parseLinesOrCsv(advTagsInput.value);

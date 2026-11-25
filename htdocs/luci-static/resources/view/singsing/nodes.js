@@ -3,40 +3,48 @@
 'require ui';
 'require singsing.api as api';
 
+var RESERVED_TAGS = ['proxy', 'auto', 'direct', 'local', 'remote', 'tun-in', 'dns-in'];
+
 return view.extend({
 	load: function() {
 		return api.loadActiveProfile();
 	},
 
 	render: function(loaded) {
-		var self = this;
 		var profile = loaded.profile;
 		var engine = loaded.engine;
 		var profileName = loaded.name;
 		var searchQuery = '';
+
 		this._saveFn = function() {
 			return api.saveProfile(profileName, profile).then(function(res) {
-				if (res && res.ok) ui.addNotification(null, E('p', '节点配置已保存'), 'info');
-				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
-				return res;
+				if (res && res.ok) {
+					ui.addNotification(null, E('p', '节点配置已保存'), 'info');
+					return res;
+				}
+				var msg = (res && res.error) || '未知错误';
+				ui.addNotification('保存失败', E('p', msg), 'danger');
+				return Promise.reject(new Error(msg));
 			});
 		};
 
+		var titleEl = E('h2', {}, '节点管理（共 ' + profile.nodes.length + ' 个）');
 		var tableWrap = E('div', { 'class': 'cbi-section', 'style': 'margin-top:12px;' });
 		var statusBar = E('div', { 'style': 'margin-top:10px;' });
 
 		var notify = function(type, text) {
+			var fg = type === 'error' ? '#991b1b' : '#166534';
 			var bg = type === 'error' ? '#fef2f2' : '#f0fdf4';
 			var bd = type === 'error' ? '#fca5a5' : '#86efac';
 			statusBar.innerHTML = '';
 			statusBar.appendChild(E('div', {
-				'style': 'padding:8px 12px;border-radius:4px;background:' + bg + ';border:1px solid ' + bd + ';white-space:pre-wrap;font-size:13px;'
+				'style': 'padding:8px 12px;border-radius:4px;background:' + bg + ';color:' + fg + ';border:1px solid ' + bd + ';white-space:pre-wrap;font-size:13px;'
 			}, text));
 		};
 
 		var persist = function(msg) {
 			return api.saveProfile(profileName, profile).then(function(res) {
-				if (res && res.ok) notify('success', msg || '节点配置已保存到路由器（请前往「运行概览」点击「生成并应用」使其生效）');
+				if (res && res.ok) notify('success', msg || '节点配置已保存到路由器（请点击底部「保存并应用」或前往「运行概览」使其生效）');
 				else notify('error', '保存失败：' + ((res && res.error) || '未知错误'));
 				renderTable();
 			});
@@ -79,6 +87,17 @@ return view.extend({
 								errDiv.textContent = '节点标签不能为空';
 								return;
 							}
+							if (RESERVED_TAGS.indexOf(draft.tag) >= 0) {
+								errDiv.textContent = '标签「' + draft.tag + '」为系统保留名称，请换一个';
+								return;
+							}
+							var dup = profile.nodes.some(function(x) { return x.id !== node.id && x.tag === draft.tag; }) ||
+								(profile.groups || []).some(function(g) { return g.tag === draft.tag; }) ||
+								(profile.settings.tailnets || []).some(function(t) { return t.tag === draft.tag; });
+							if (dup) {
+								errDiv.textContent = '标签「' + draft.tag + '」已被其他节点、代理组或 Tailnet 使用';
+								return;
+							}
 							var check = engine.nodeObject(draft);
 							if (check.error) {
 								errDiv.textContent = check.error;
@@ -106,7 +125,7 @@ return view.extend({
 			var errDiv = E('div', { 'style': 'color:#dc2626;font-size:12px;margin-top:6px;' });
 
 			ui.showModal('批量导入节点', [
-				E('p', { 'style': 'font-size:12px;color:#555;' }, '复用上游解析器，支持 sing-box JSON / Clash YAML / Mihomo YAML / Base64 / SIP008 / VLESS / VMess / Trojan / SS / Hysteria2 等分享链接。无法转换的字段将明确给出提示。'),
+				E('p', { 'style': 'font-size:12px;opacity:0.8;' }, '复用上游解析器，支持 sing-box JSON / Clash YAML / Mihomo YAML / Base64 / SIP008 / VLESS / VMess / Trojan / SS / Hysteria2 等分享链接。无法转换的字段将明确给出提示。'),
 				area,
 				errDiv,
 				E('div', { 'class': 'right', 'style': 'margin-top:10px;' }, [
@@ -120,28 +139,49 @@ return view.extend({
 								errDiv.textContent = '请粘贴要导入的内容';
 								return;
 							}
-							var res = engine.importConfig(raw);
-							if (res.error) {
-								errDiv.textContent = res.error;
+							var rawRes, fitted;
+							try {
+								rawRes = engine.importConfig(raw);
+								fitted = engine.fitImport(rawRes);
+							} catch (e) {
+								errDiv.textContent = (e && e.message) ? e.message : String(e);
 								return;
 							}
-							if (!res.nodes || !res.nodes.length) {
+							if (!fitted.nodes || !fitted.nodes.length) {
 								errDiv.textContent = '未识别到可导入的节点';
 								return;
 							}
-							var used = profile.nodes.map(function(n) { return n.tag; });
-							res.nodes.forEach(function(n) {
+							var used = RESERVED_TAGS
+								.concat(profile.nodes.map(function(n) { return n.tag; }))
+								.concat((profile.groups || []).map(function(g) { return g.tag; }))
+								.concat((profile.settings.tailnets || []).map(function(t) { return t.tag; }));
+							var renames = {};
+							fitted.nodes.forEach(function(n) {
+								var orig = n.tag;
 								if (used.indexOf(n.tag) >= 0) {
 									n.tag = engine.freshTag(n.tag, used);
+									renames[orig] = n.tag;
 								}
 								used.push(n.tag);
+							});
+							fitted.nodes.forEach(function(n) {
+								try {
+									var o = JSON.parse(n.body);
+									if (typeof o.detour === 'string' && renames[o.detour]) {
+										o.detour = renames[o.detour];
+										n.body = JSON.stringify(o, null, 2);
+									}
+								} catch (e) {}
 								profile.nodes.push(n);
 							});
 							ui.hideModal();
-							var warnMsg = (res.warnings && res.warnings.length)
-								? ('\n转换提示：\n• ' + res.warnings.join('\n• '))
+							var allNotes = (rawRes.notes || []).concat(
+								(fitted.renamed || []).map(function(r) { return '标签重命名：' + r; })
+							);
+							var warnMsg = allNotes.length
+								? ('\n转换提示：\n• ' + allNotes.join('\n• '))
 								: '';
-							persist('成功导入 ' + res.nodes.length + ' 个节点' + warnMsg);
+							persist('成功导入 ' + fitted.nodes.length + ' 个节点' + warnMsg);
 						}
 					}, '解析并导入')
 				])
@@ -158,6 +198,7 @@ return view.extend({
 		};
 
 		var renderTable = function() {
+			titleEl.textContent = '节点管理（共 ' + profile.nodes.length + ' 个）';
 			var q = searchQuery.trim().toLowerCase();
 			var rows = [
 				E('tr', { 'class': 'tr table-titles' }, [
@@ -183,7 +224,7 @@ return view.extend({
 
 			if (!filtered.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;color:#666;' },
+					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;opacity:0.7;' },
 						profile.nodes.length ? '没有匹配筛选条件的节点。' : '暂无节点，请点击上方按钮从模板新建或批量导入。')
 				]));
 			} else {
@@ -214,7 +255,7 @@ return view.extend({
 							E('button', {
 								'class': 'btn',
 								'click': function() {
-									var used = profile.nodes.map(function(x) { return x.tag; });
+									var used = RESERVED_TAGS.concat(profile.nodes.map(function(x) { return x.tag; }));
 									var copy = engine.newNode({
 										tag: engine.freshTag(n.tag, used),
 										body: n.body,
@@ -261,7 +302,7 @@ return view.extend({
 		renderTable();
 
 		return E('div', { 'class': 'cbi-map' }, [
-			E('h2', {}, '节点管理（共 ' + profile.nodes.length + ' 个）'),
+			titleEl,
 			E('div', { 'class': 'cbi-map-descr' }, '完整保留上游 20+ 协议模板与多格式批量导入。支持搜索、排序、复制、编辑 JSONC 及一键切换是否加入默认代理组。'),
 			E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;' }, [
 				tplSelect,
@@ -269,7 +310,7 @@ return view.extend({
 					'class': 'btn cbi-button-add',
 					'click': function() {
 						var tpl = engine.TEMPLATES.find(function(t) { return t.id === tplSelect.value; }) || engine.TEMPLATES[0];
-						var used = profile.nodes.map(function(n) { return n.tag; });
+						var used = RESERVED_TAGS.concat(profile.nodes.map(function(n) { return n.tag; }));
 						var node = engine.newNode({
 							tag: engine.freshTag(tpl.tagPrefix, used),
 							body: tpl.body

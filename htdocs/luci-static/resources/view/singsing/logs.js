@@ -20,7 +20,7 @@ return view.extend({
 		}, logsRes.logs || '暂无 sing-box 相关日志');
 
 		var diagBox = E('div', {
-			'style': 'margin:10px 0;padding:10px 14px;border:1px solid #ddd;border-radius:6px;background:#f8fafc;font-size:13px;'
+			'style': 'margin:10px 0;padding:10px 14px;border:1px solid var(--border-color-medium, rgba(127,127,127,0.25));border-radius:6px;background:var(--background-color-high, rgba(127,127,127,0.05));font-size:13px;'
 		});
 
 		var renderDiag = function(d) {

@@ -34,62 +34,187 @@ ensure_dirs() {
 	ts_root="$(uci_get "main.tailscale_state_root" "/etc/sing-box/tailscale")"
 
 	mkdir -p "$PROFILES_DIR" "$SB_DIR" "$ruleset_dir" "$ts_root" "$TMP_DL_DIR"
-	chmod 700 "$CONF_DIR" "$PROFILES_DIR" 2>/dev/null || true
+	chmod 700 "$CONF_DIR" "$PROFILES_DIR" "$ts_root" 2>/dev/null || true
+	[ -f "$SB_CONFIG" ] && chmod 600 "$SB_CONFIG" 2>/dev/null || true
 	chmod 755 "$TMP_DIR" "$TMP_DL_DIR" 2>/dev/null || true
 }
 
-get_dnsmasq_conf_file() {
-	local uci_cfg conf_dir
+check_local_dns() {
+	local srv=""
+	if [ "$#" -gt 0 ]; then
+		srv="$1"
+	else
+		srv="$(uci_get "dns.local_server" "")"
+	fi
+	[ -n "$srv" ] || return 1
+
+	DNS_SRV="$srv" ucode -e '
+		import { popen } from "fs";
+
+		function isV4(ip) {
+			let m = match(ip, /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$/);
+			if (!m) return false;
+			for (let i = 1; i <= 4; i++) if (int(m[i]) > 255) return false;
+			return true;
+		}
+
+		function expandV6(raw) {
+			let ip = trim(raw);
+			if (index(ip, ":") < 0) return null;
+			if ((substr(ip, 0, 1) == ":" && substr(ip, 0, 2) != "::") ||
+			    (substr(ip, length(ip) - 1, 1) == ":" && substr(ip, length(ip) - 2, 2) != "::"))
+				return null;
+			let lcIdx = rindex(ip, ":");
+			let tail = substr(ip, lcIdx + 1);
+			if (index(tail, ".") >= 0) {
+				if (!isV4(tail)) return null;
+				let p = split(tail, ".");
+				let hi = sprintf("%x", (int(p[0]) << 8) | int(p[1]));
+				let lo = sprintf("%x", (int(p[2]) << 8) | int(p[3]));
+				ip = substr(ip, 0, lcIdx + 1) + hi + ":" + lo;
+			}
+			let halves = split(ip, "::");
+			if (length(halves) > 2) return null;
+			let parseSeg = (seg) => {
+				if (!seg || length(seg) == 0) return [];
+				let out = [];
+				for (let g in split(seg, ":")) {
+					if (!match(g, /^[0-9a-fA-F]{1,4}$/)) return null;
+					push(out, hex(g));
+				}
+				return out;
+			};
+			let left = parseSeg(halves[0]);
+			if (left == null) return null;
+			if (length(halves) == 2) {
+				let right = parseSeg(halves[1]);
+				if (right == null || length(left) + length(right) > 7) return null;
+				let res = [...left];
+				for (let z = 0; z < 8 - length(left) - length(right); z++) push(res, 0);
+				for (let w in right) push(res, w);
+				return res;
+			}
+			return length(left) == 8 ? left : null;
+		}
+
+		let s = lc(trim(getenv("DNS_SRV") || ""));
+		let v4 = isV4(s);
+		let v6 = v4 ? null : expandV6(s);
+		if (!v4 && !v6) exit(1);
+		if (v4 && (s == "0.0.0.0" || substr(s, 0, 4) == "127.")) exit(1);
+		if (v6) {
+			let z5 = (v6[0] == 0 && v6[1] == 0 && v6[2] == 0 && v6[3] == 0 && v6[4] == 0);
+			if (z5 && v6[5] == 0 && v6[6] == 0 && (v6[7] == 0 || v6[7] == 1)) exit(1);
+			if (z5 && v6[5] == 0xffff && ((v6[6] == 0 && v6[7] == 0) || ((v6[6] >> 8) == 127))) exit(1);
+		}
+
+		let p = popen("ubus call network.interface dump 2>/dev/null", "r");
+		if (p) {
+			let raw = p.read("all") || "";
+			p.close();
+			let d = json(raw);
+			for (let ifc in (d?.interface || [])) {
+				for (let k in ["ipv4-address", "ipv6-address"]) {
+					for (let a in (ifc[k] || [])) {
+						let lip = lc(trim("" + (a?.address || "")));
+						if (!lip) continue;
+						if (v4 && lip == s) exit(1);
+						if (v6) {
+							let lv6 = expandV6(lip);
+							if (lv6 && sprintf("%J", lv6) == sprintf("%J", v6)) exit(1);
+						}
+					}
+				}
+				for (let pa in (ifc["ipv6-prefix-assignment"] || [])) {
+					let lip = lc(trim("" + (pa?.["local-address"]?.address || "")));
+					if (v6 && lip) {
+						let lv6 = expandV6(lip);
+						if (lv6 && sprintf("%J", lv6) == sprintf("%J", v6)) exit(1);
+					}
+				}
+			}
+		}
+		exit(0);
+	' 2>/dev/null
+}
+
+get_dnsmasq_main_conf() {
+	local uci_cfg
 	uci_cfg="$(uci -q show "dhcp.@dnsmasq[0]" 2>/dev/null | awk 'NR==1 {split($0, c, /[.=]/); print c[2]}')"
 	if [ -n "$uci_cfg" ] && [ -f "/tmp/etc/dnsmasq.conf.$uci_cfg" ]; then
-		conf_dir="$(awk -F '=' '/^conf-dir=/ {print $2; exit}' "/tmp/etc/dnsmasq.conf.$uci_cfg")"
+		printf '/tmp/etc/dnsmasq.conf.%s' "$uci_cfg"
+	fi
+}
+
+get_dnsmasq_conf_file() {
+	local main_conf conf_dir=""
+	main_conf="$(get_dnsmasq_main_conf)"
+	if [ -n "$main_conf" ] && [ -f "$main_conf" ]; then
+		conf_dir="$(awk -F '=' '/^conf-dir=/ {sub(/,.*/, "", $2); print $2; exit}' "$main_conf")"
 	fi
 	[ -n "${conf_dir:-}" ] || conf_dir="/tmp/dnsmasq.d"
 	printf '%s/dnsmasq-singsing.conf' "$conf_dir"
 }
 
 dnsmasq_takeover() {
-	local manage listen_addr listen_port conf_file conf_dir tmp_file
+	local manage listen_addr listen_port main_conf conf_file conf_dir tmp_file
 	manage="$(uci_get "dns.dnsmasq_manage" "1")"
-	[ "$manage" = "1" ] || return 0
+	if [ "$manage" != "1" ]; then
+		dnsmasq_restore
+		return 0
+	fi
 
 	listen_addr="$(uci_get "dns.listen_address" "127.0.0.1")"
 	listen_port="$(uci_get "dns.listen_port" "5335")"
+	main_conf="$(get_dnsmasq_main_conf)"
 	conf_file="$(get_dnsmasq_conf_file)"
 	conf_dir="$(dirname "$conf_file")"
 
 	mkdir -p "$conf_dir"
 	tmp_file="${conf_file}.tmp.$$"
-	cat > "$tmp_file" <<EOF
-# Managed by luci-app-singsing (RAM drop-in, zero flash write)
-no-resolv
-cache-size=0
-server=${listen_addr}#${listen_port}
-EOF
+	{
+		printf '# Managed by luci-app-singsing (RAM drop-in, zero flash write)\n'
+		printf 'no-resolv\n'
+		if [ -z "$main_conf" ] || ! grep -q '^cache-size=' "$main_conf" 2>/dev/null; then
+			printf 'cache-size=0\n'
+		fi
+		printf 'server=%s#%s\n' "$listen_addr" "$listen_port"
+	} > "$tmp_file"
 
 	if [ -f "$conf_file" ] && cmp -s "$tmp_file" "$conf_file"; then
 		rm -f "$tmp_file"
 		return 0
 	fi
 	mv -f "$tmp_file" "$conf_file"
+
+	if [ -n "$main_conf" ] && command -v dnsmasq >/dev/null 2>&1; then
+		if ! dnsmasq --test -C "$main_conf" >/dev/null 2>&1; then
+			rm -f "$conf_file"
+			logger -t singsing -p daemon.err "dnsmasq --test failed with drop-in; aborted takeover"
+			return 1
+		fi
+	fi
+
 	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
 }
 
 dnsmasq_restore() {
-	local conf_file changed=0
+	local conf_file f changed=0
 	conf_file="$(get_dnsmasq_conf_file)"
 
-	if [ -f "$conf_file" ]; then
-		rm -f "$conf_file"
-		changed=1
-	fi
+	for f in "$conf_file" /tmp/dnsmasq.d/dnsmasq-singsing.conf /tmp/dnsmasq.*.d/dnsmasq-singsing.conf; do
+		if [ -f "$f" ]; then
+			rm -f "$f"
+			changed=1
+		fi
+	done
 
 	# Also clean up legacy /etc/config/dhcp backup if upgrading from earlier version
 	if [ -f "$DNSMASQ_BACKUP" ]; then
-		ucode -e '
+		DNSMASQ_BACKUP_FILE="$DNSMASQ_BACKUP" ucode -e '
 			import { readfile } from "fs";
 			import { cursor } from "uci";
-			let raw = readfile("'"$DNSMASQ_BACKUP"'");
+			let raw = readfile(getenv("DNSMASQ_BACKUP_FILE"));
 			if (!raw) exit(0);
 			let data = json(raw);
 			let c = cursor();
@@ -138,13 +263,18 @@ download_file() {
 
 	ensure_dirs
 	eff_url="$(apply_download_prefix "$url")"
+	case "$eff_url" in
+		https://*|http://*) ;;
+		*) return 1 ;;
+	esac
+
 	dest_dir="$(dirname "$dest")"
 	mkdir -p "$dest_dir"
 	tmp_file="$TMP_DL_DIR/$(basename "$dest").$$.tmp"
 
 	rm -f "$tmp_file"
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --connect-timeout 6 --max-time 15 -o "$tmp_file" "$eff_url" 2>/dev/null || {
+		curl -fsSL --proto '=http,https' --proto-redir '=http,https' --connect-timeout 6 --max-time 15 -o "$tmp_file" "$eff_url" 2>/dev/null || {
 			rm -f "$tmp_file"
 			return 1
 		}
@@ -163,32 +293,48 @@ download_file() {
 		return 1
 	fi
 
-	# If JSON source rule-set, verify valid JSON
+	# If JSON source rule-set, verify valid JSON safely via getenv
 	if [ "$format" = "source" ] && command -v ucode >/dev/null 2>&1; then
-		ucode -e 'import { readfile } from "fs"; if (json(readfile("'"$tmp_file"'")) == null) exit(1);' 2>/dev/null || {
+		TMP_JSON_FILE="$tmp_file" ucode -e 'import { readfile } from "fs"; if (json(readfile(getenv("TMP_JSON_FILE"))) == null) exit(1);' 2>/dev/null || {
 			rm -f "$tmp_file"
 			return 1
 		}
 	fi
 
+	chmod 644 "$tmp_file" 2>/dev/null || true
 	mv -f "$tmp_file" "$dest"
 	return 0
+}
+
+read_safe_manifest() {
+	local ruleset_dir
+	ruleset_dir="$(uci_get "main.ruleset_dir" "/etc/sing-box/rule-sets")"
+	MANIFEST_PATH="$MANIFEST_FILE" RULESET_DIR="$ruleset_dir" ucode -e '
+		import { readfile } from "fs";
+		let dir = replace(getenv("RULESET_DIR") || "/etc/sing-box/rule-sets", /\/+$/, "");
+		if (substr(dir, 0, 1) != "/" || index(dir, "..") >= 0) exit(1);
+		let arr = json(readfile(getenv("MANIFEST_PATH")) || "[]");
+		if (type(arr) == "array") {
+			for (let r in arr) {
+				if (type(r) != "object") continue;
+				let tag = "" + (r.tag || "");
+				if (index(tag, "..") >= 0 || !match(tag, /^[a-zA-Z0-9_!@-][a-zA-Z0-9_!@.-]{0,127}$/)) continue;
+				let fmt = (r.format == "source") ? "source" : "binary";
+				let url = trim("" + (r.url || ""));
+				if (length(url) > 0 && !match(url, /^https?:\/\/[^[:space:]]+$/)) continue;
+				let ext = (fmt == "source") ? "json" : "srs";
+				printf("%s\t%s\t%s\t%s/%s.%s\n", tag, url, fmt, dir, tag, ext);
+			}
+		}
+	' 2>/dev/null || true
 }
 
 ensure_rulesets() {
 	[ -f "$MANIFEST_FILE" ] || return 0
 	ensure_dirs
 
-	local lines line tag url format path failed=0
-	lines="$(ucode -e '
-		import { readfile } from "fs";
-		let arr = json(readfile("'"$MANIFEST_FILE"'") || "[]");
-		if (type(arr) == "array") {
-			for (let r in arr)
-				printf("%s\t%s\t%s\t%s\n", r.tag || "", r.url || "", r.format || "binary", r.path || "");
-		}
-	' 2>/dev/null || true)"
-
+	local lines tag url format path
+	lines="$(read_safe_manifest)"
 	[ -z "$lines" ] && return 0
 
 	printf '%s\n' "$lines" | while IFS='	' read -r tag url format path; do
@@ -215,57 +361,52 @@ update_rulesets() {
 	}
 	ensure_dirs
 
-	local lines updated="" failed="" changed=0
-	lines="$(ucode -e '
-		import { readfile } from "fs";
-		let arr = json(readfile("'"$MANIFEST_FILE"'") || "[]");
-		if (type(arr) == "array") {
-			for (let r in arr)
-				printf("%s\t%s\t%s\t%s\n", r.tag || "", r.url || "", r.format || "binary", r.path || "");
+	(
+		flock -x -n 200 || {
+			printf '{"ok":false,"updated":[],"failed":[],"error":"Another apply or update operation is in progress"}\n'
+			exit 1
 		}
-	' 2>/dev/null || true)"
 
-	local tmp_res="$TMP_DIR/ruleset-update.$$.tmp"
-	: > "$tmp_res"
+		local lines tmp_res changed=0
+		lines="$(read_safe_manifest)"
+		tmp_res="$TMP_DIR/ruleset-update.$$.tmp"
+		trap 'rm -f "$tmp_res"' EXIT INT TERM
+		: > "$tmp_res"
 
-	printf '%s\n' "$lines" | while IFS='	' read -r tag url format path; do
-		[ -n "$tag" ] && [ -n "$path" ] && [ -n "$url" ] || continue
-		if [ -n "$target_tag" ] && [ "$tag" != "$target_tag" ]; then
-			continue
+		printf '%s\n' "$lines" | while IFS='	' read -r tag url format path; do
+			[ -n "$tag" ] && [ -n "$path" ] && [ -n "$url" ] || continue
+			if [ -n "$target_tag" ] && [ "$tag" != "$target_tag" ]; then
+				continue
+			fi
+			if download_file "$url" "$path" "$format"; then
+				printf 'OK\t%s\n' "$tag" >> "$tmp_res"
+			else
+				printf 'FAIL\t%s\n' "$tag" >> "$tmp_res"
+			fi
+		done
+
+		if grep -q '^OK	' "$tmp_res" 2>/dev/null && [ -n "$(get_service_pid)" ]; then
+			SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1 || true
+			if wait_dns_ready 8; then
+				dnsmasq_takeover
+			fi
 		fi
-		if download_file "$url" "$path" "$format"; then
-			printf 'OK\t%s\n' "$tag" >> "$tmp_res"
-		else
-			printf 'FAIL\t%s\n' "$tag" >> "$tmp_res"
-		fi
-	done
 
-	local ok_count=0 fail_count=0
-	while IFS='	' read -r st tag; do
-		[ -n "$tag" ] || continue
-		if [ "$st" = "OK" ]; then
-			ok_count=$((ok_count + 1))
-			updated="${updated:+$updated,}\"$tag\""
-			changed=1
-		else
-			fail_count=$((fail_count + 1))
-			failed="${failed:+$failed,}\"$tag\""
-		fi
-	done < "$tmp_res"
-	rm -f "$tmp_res"
-
-	# Reload sing-box if running and any rule-set updated
-	if [ "$changed" -eq 1 ] && [ -n "$(get_service_pid)" ]; then
-		/etc/init.d/singsing restart >/dev/null 2>&1 || true
-	fi
-
-	if [ "$fail_count" -eq 0 ]; then
-		printf '{"ok":true,"updated":[%s],"failed":[]}\n' "$updated"
-		return 0
-	else
-		printf '{"ok":false,"updated":[%s],"failed":[%s]}\n' "$updated" "$failed"
-		return 1
-	fi
+		RES_FILE="$tmp_res" ucode -e '
+			import { readfile } from "fs";
+			let raw = readfile(getenv("RES_FILE")) || "";
+			let updated = [], failed = [];
+			for (let line in split(raw, "\n")) {
+				let p = split(line, "\t");
+				if (length(p) < 2 || length(p[1]) == 0) continue;
+				if (p[0] == "OK") push(updated, p[1]);
+				else push(failed, p[1]);
+			}
+			let ok = (length(failed) == 0);
+			printf("%J\n", { ok: ok, updated: updated, failed: failed });
+			exit(ok ? 0 : 1);
+		'
+	) 200>"$LOCK_FILE"
 }
 
 validate_config() {
@@ -292,20 +433,34 @@ get_service_pid() {
 	printf '%s' "$pid"
 }
 
+is_port_listening() {
+	local port="$1"
+	if command -v ss >/dev/null 2>&1; then
+		if ss -Hlntu 2>/dev/null | awk -v p=":$port" '$5 ~ p "$" {found=1; exit} END {exit !found}'; then
+			return 0
+		fi
+	fi
+	if command -v netstat >/dev/null 2>&1; then
+		if netstat -lntu 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" {found=1; exit} END {exit !found}'; then
+			return 0
+		fi
+	fi
+	return 1
+}
+
 wait_dns_ready() {
-	local port timeout i pid
+	local port timeout i pid has_sock_tool=0
 	port="$(uci_get "dns.listen_port" "5335")"
 	timeout="${1:-10}"
+	if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
+		has_sock_tool=1
+	fi
 	i=0
 	while [ "$i" -lt "$timeout" ]; do
 		pid="$(get_service_pid)"
 		if [ -n "$pid" ]; then
-			if command -v ss >/dev/null 2>&1; then
-				if ss -lntu 2>/dev/null | grep -q ":${port}[[:space:]]"; then
-					return 0
-				fi
-			elif command -v netstat >/dev/null 2>&1; then
-				if netstat -lntu 2>/dev/null | grep -q ":${port}[[:space:]]"; then
+			if [ "$has_sock_tool" -eq 1 ]; then
+				if is_port_listening "$port"; then
 					return 0
 				fi
 			else
@@ -327,10 +482,22 @@ apply_config() {
 			exit 1
 		}
 
-		local local_dns auto_rollback err_out
+		trap 'rm -f "$TX_FILE"' EXIT INT TERM
+
+		local enabled_flag local_dns auto_rollback err_out
+		enabled_flag="$(uci_get "main.enabled" "0")"
+		if [ "$enabled_flag" != "1" ]; then
+			rm -f "$TMP_NEW_CONFIG"
+			if [ -n "$(get_service_pid)" ]; then
+				/etc/init.d/singsing stop >/dev/null 2>&1 || true
+			fi
+			dnsmasq_restore
+			exit 0
+		fi
+
 		local_dns="$(uci_get "dns.local_server" "")"
-		if [ -z "$local_dns" ]; then
-			printf 'Direct upstream DNS (dns.local_server) is required before applying\n' >&2
+		if ! check_local_dns "$local_dns"; then
+			printf 'Valid direct upstream DNS IP (dns.local_server) is required before applying\n' >&2
 			exit 1
 		fi
 
@@ -343,14 +510,12 @@ apply_config() {
 
 		# 1. Ensure local rule-sets exist (auto-download missing ones)
 		if ! err_out="$(ensure_rulesets 2>&1)"; then
-			rm -f "$TX_FILE"
 			printf '%s\n' "$err_out" >&2
 			exit 1
 		fi
 
 		# 2. Validate candidate config with sing-box check
 		if ! err_out="$(validate_config "$TMP_NEW_CONFIG" 2>&1)"; then
-			rm -f "$TX_FILE"
 			printf 'Config check failed:\n%s\n' "$err_out" >&2
 			exit 1
 		fi
@@ -365,22 +530,12 @@ apply_config() {
 		mv -f "$TMP_NEW_CONFIG" "$SB_CONFIG"
 		chmod 600 "$SB_CONFIG" 2>/dev/null || true
 
-		# 5. Restart service only when enabled=1; if disabled, ensure stopped & dnsmasq restored
-		local enabled_flag
-		enabled_flag="$(uci_get "main.enabled" "0")"
-		if [ "$enabled_flag" != "1" ]; then
-			/etc/init.d/singsing stop >/dev/null 2>&1 || true
-			dnsmasq_restore
-			rm -f "$TX_FILE"
-			exit 0
-		fi
-
-		/etc/init.d/singsing restart >/dev/null 2>&1
+		# 5. Restart service (skip duplicate rule-set/check/wait inside init.d)
+		SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1
 
 		# 6. Health check
-		if wait_dns_ready 12; then
+		if wait_dns_ready 10; then
 			dnsmasq_takeover
-			rm -f "$TX_FILE"
 			exit 0
 		fi
 
@@ -389,10 +544,9 @@ apply_config() {
 		if [ "$auto_rollback" = "1" ] && [ -s "$SB_LAST_GOOD" ]; then
 			cp -f "$SB_LAST_GOOD" "$SB_CONFIG"
 			chmod 600 "$SB_CONFIG" 2>/dev/null || true
-			/etc/init.d/singsing restart >/dev/null 2>&1
-			if wait_dns_ready 10; then
+			SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1
+			if wait_dns_ready 8; then
 				dnsmasq_takeover
-				rm -f "$TX_FILE"
 				printf 'New config failed to start; rolled back to last good config\n' >&2
 				exit 2
 			fi
@@ -401,79 +555,101 @@ apply_config() {
 		# Complete failure: restore dnsmasq so router retains internet access
 		dnsmasq_restore
 		/etc/init.d/singsing stop >/dev/null 2>&1 || true
-		rm -f "$TX_FILE"
 		printf 'sing-box failed to start; dnsmasq restored for safety\n' >&2
 		exit 1
 	) 200>"$LOCK_FILE"
 }
 
 notify_cron() {
-	# Safe BusyBox crond reload: never restart crond from inside a running cron job.
-	printf '%s\n' 'root' >> /etc/crontabs/cron.update
+	# Safe BusyBox crond reload: never restart crond if already running (safe inside cron jobs).
+	# If crond is not running yet (e.g. fresh OpenWrt install where /etc/crontabs was empty), start it.
+	local cron_running=0
+	if command -v ubus >/dev/null 2>&1 && command -v ucode >/dev/null 2>&1; then
+		cron_running="$(ubus call service list '{"name":"cron"}' 2>/dev/null | ucode -e '
+			import { stdin } from "fs";
+			let d = json(stdin.read("all") || "{}");
+			let insts = d?.cron?.instances;
+			if (type(insts) == "object") {
+				for (let k, v in insts) if (v && v.running) { print(1); exit(0); }
+			}
+			print(0);
+		' 2>/dev/null || printf '0')"
+	fi
+	if [ "$cron_running" = "1" ]; then
+		printf '%s\n' 'root' >> /etc/crontabs/cron.update
+	else
+		/etc/init.d/cron start >/dev/null 2>&1 || true
+	fi
 }
 
 cron_remove() {
 	local crontab="/etc/crontabs/root"
 	local cron_lock="/var/lock/root-crontab"
-	local tmp changed=0
+	local tmp="" changed=0
 	[ -f "$crontab" ] || return 0
 
 	mkdir -p "$(dirname "$cron_lock")"
-	lock "$cron_lock" || return 1
-	tmp="$(mktemp /etc/crontabs/.singbox-cron.XXXXXX)" || { lock -u "$cron_lock"; return 1; }
-	grep -v "# singsing-sub" "$crontab" > "$tmp" 2>/dev/null || : > "$tmp"
-	chmod 600 "$tmp" 2>/dev/null || true
-	if ! cmp -s "$tmp" "$crontab"; then
-		mv -f "$tmp" "$crontab"
-		changed=1
-	else
-		rm -f "$tmp"
-	fi
-	lock -u "$cron_lock"
-	[ "$changed" -eq 0 ] || notify_cron
+	(
+		lock "$cron_lock" || exit 1
+		trap '[ -n "${tmp:-}" ] && rm -f "$tmp"; lock -u "$cron_lock" 2>/dev/null || true' EXIT INT TERM
+		tmp="$(mktemp /etc/crontabs/.singbox-cron.XXXXXX)" || exit 1
+		grep -v "# singsing-sub" "$crontab" > "$tmp" 2>/dev/null || : > "$tmp"
+		chmod 600 "$tmp" 2>/dev/null || true
+		if ! cmp -s "$tmp" "$crontab"; then
+			mv -f "$tmp" "$crontab"
+			tmp=""
+			changed=1
+		fi
+		[ "$changed" -eq 0 ] || notify_cron
+	)
 }
 
 cron_sync() {
-	local auto_update interval crontab cron_lock expr tmp changed=0
+	local auto_update interval crontab cron_lock expr tmp="" changed=0
 	auto_update="$(uci_get "subscription.auto_update" "0")"
 	interval="$(uci_get "subscription.update_interval" "86400")"
 	crontab="/etc/crontabs/root"
 	cron_lock="/var/lock/root-crontab"
 
 	mkdir -p /etc/crontabs "$(dirname "$cron_lock")"
-	lock "$cron_lock" || return 1
-	tmp="$(mktemp /etc/crontabs/.singbox-cron.XXXXXX)" || { lock -u "$cron_lock"; return 1; }
+	(
+		lock "$cron_lock" || exit 1
+		trap '[ -n "${tmp:-}" ] && rm -f "$tmp"; lock -u "$cron_lock" 2>/dev/null || true' EXIT INT TERM
+		tmp="$(mktemp /etc/crontabs/.singbox-cron.XXXXXX)" || exit 1
 
-	if [ -f "$crontab" ]; then
-		grep -v "# singsing-sub" "$crontab" > "$tmp" 2>/dev/null || : > "$tmp"
-	else
-		: > "$tmp"
-	fi
+		if [ -f "$crontab" ]; then
+			grep -v "# singsing-sub" "$crontab" > "$tmp" 2>/dev/null || : > "$tmp"
+		else
+			: > "$tmp"
+		fi
 
-	if [ "$auto_update" = "1" ]; then
-		case "$interval" in
-			21600)  expr="15 */6 * * *" ;;
-			43200)  expr="15 */12 * * *" ;;
-			259200) expr="30 3 */3 * *" ;;
-			604800) expr="30 3 * * 1" ;;
-			*)      expr="30 3 * * *" ;;
-		esac
-		printf '%s /usr/share/singsing/subscription-updater.uc >/dev/null 2>&1 # singsing-sub\n' "$expr" >> "$tmp"
-	fi
+		if [ "$auto_update" = "1" ]; then
+			case "$interval" in
+				21600)  expr="15 */6 * * *" ;;
+				43200)  expr="15 */12 * * *" ;;
+				259200) expr="30 3 */3 * *" ;;
+				604800) expr="30 3 * * 1" ;;
+				*)      expr="30 3 * * *" ;;
+			esac
+			printf '%s /usr/share/singsing/subscription-updater.uc >/dev/null 2>&1 # singsing-sub\n' "$expr" >> "$tmp"
+		fi
 
-	chmod 600 "$tmp" 2>/dev/null || true
-	if [ -f "$crontab" ] && cmp -s "$tmp" "$crontab"; then
-		rm -f "$tmp"
-	else
-		mv -f "$tmp" "$crontab"
-		changed=1
-	fi
-	lock -u "$cron_lock"
-	[ "$changed" -eq 0 ] || notify_cron
+		chmod 600 "$tmp" 2>/dev/null || true
+		if [ -f "$crontab" ] && cmp -s "$tmp" "$crontab"; then
+			rm -f "$tmp"
+			tmp=""
+		else
+			mv -f "$tmp" "$crontab"
+			tmp=""
+			changed=1
+		fi
+		[ "$changed" -eq 0 ] || notify_cron
+	)
 }
 
 case "${1:-}" in
 	ensure_dirs)      ensure_dirs ;;
+	check_local_dns)  check_local_dns "${2:-}" ;;
 	dnsmasq_takeover) dnsmasq_takeover ;;
 	dnsmasq_restore)  dnsmasq_restore ;;
 	ensure_rulesets)  ensure_rulesets ;;
@@ -484,7 +660,7 @@ case "${1:-}" in
 	cron_sync)        cron_sync ;;
 	cron_remove)      cron_remove ;;
 	*)
-		printf 'Usage: %s {ensure_dirs|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|validate_config|wait_dns_ready|apply_config|cron_sync|cron_remove}\n' "$0" >&2
+		printf 'Usage: %s {ensure_dirs|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|validate_config|wait_dns_ready|apply_config|cron_sync|cron_remove}\n' "$0" >&2
 		exit 1
 		;;
 esac

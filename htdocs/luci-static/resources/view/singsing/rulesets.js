@@ -104,31 +104,45 @@ return view.extend({
 			input.onchange = function() {
 				var file = input.files && input.files[0];
 				if (!file) return;
-				if (file.size > 16 * 1024 * 1024) {
-					showMsg(false, '文件过大（超过 16MB）');
+				if (file.size > 4 * 1024 * 1024) {
+					showMsg(false, '文件过大（超过 4MB 上限）');
 					return;
 				}
 				ui.showModal('离线上传规则集', [E('p', { 'class': 'spinning' }, '正在上传 ' + file.name + ' 到路由器...')]);
 				var reader = new FileReader();
 				reader.onload = function() {
 					var bytes = new Uint8Array(reader.result);
-					var bin = '';
-					var chunk = 0x8000;
-					for (var i = 0; i < bytes.length; i += chunk) {
-						bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-					}
-					var b64 = btoa(bin);
-					api.rulesetUpload(it.tag, it.format || 'binary', b64).then(function(res) {
-						ui.hideModal();
-						if (res && res.ok) {
-							showMsg(true, '规则集「' + it.tag + '」离线上传成功（' + formatBytes(res.size) + '），保存至 ' + res.path);
-							reloadList();
-						} else {
-							showMsg(false, '上传失败：' + ((res && res.error) || '未知错误'));
+					var sliceSize = 256 * 1024;
+					var totalChunks = Math.max(1, Math.ceil(bytes.length / sliceSize));
+					var toBase64 = function(arr) {
+						var bin = '';
+						var sub = 0x8000;
+						for (var i = 0; i < arr.length; i += sub) {
+							bin += String.fromCharCode.apply(null, arr.subarray(i, i + sub));
 						}
+						return btoa(bin);
+					};
+					var sendChunk = function(idx) {
+						var start = idx * sliceSize;
+						var end = Math.min(bytes.length, start + sliceSize);
+						var b64 = toBase64(bytes.subarray(start, end));
+						return api.rulesetUpload(it.tag, it.format || 'binary', b64, idx, totalChunks).then(function(res) {
+							if (!res || !res.ok) {
+								throw new Error((res && res.error) || '分片上传失败');
+							}
+							if (idx + 1 < totalChunks) {
+								return sendChunk(idx + 1);
+							}
+							return res;
+						});
+					};
+					sendChunk(0).then(function(res) {
+						ui.hideModal();
+						showMsg(true, '规则集「' + it.tag + '」离线上传成功（' + formatBytes(res.size) + '），保存至 ' + res.path);
+						reloadList();
 					}).catch(function(err) {
 						ui.hideModal();
-						showMsg(false, '上传异常：' + String(err));
+						showMsg(false, '上传失败：' + ((err && err.message) ? err.message : String(err)));
 					});
 				};
 				reader.onerror = function() {
@@ -253,9 +267,13 @@ return view.extend({
 
 		this._saveFn = function() {
 			return api.saveRulesetUrls(JSON.stringify(urlOverrides, null, 2), currentManifestJson()).then(function(res) {
-				if (res && res.ok) ui.addNotification(null, E('p', '规则集下载地址清单已保存'), 'info');
-				else ui.addNotification('保存失败', E('p', (res && res.error) || '未知错误'), 'danger');
-				return res;
+				if (res && res.ok) {
+					ui.addNotification(null, E('p', '规则集下载地址清单已保存'), 'info');
+					return res;
+				}
+				var msg = (res && res.error) || '未知错误';
+				ui.addNotification('保存失败', E('p', msg), 'danger');
+				return Promise.reject(new Error(msg));
 			});
 		};
 
