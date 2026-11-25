@@ -221,7 +221,10 @@ return view.extend({
 
 		var renderProxySettings = function() {
 			var choices = engine.proxyChoices(profile);
-			var defSel = E('select', { 'class': 'cbi-input-select' }, [
+			var defSel = E('select', {
+				'class': 'cbi-input-select',
+				'change': function() { profile.settings.proxyDefault = defSel.value; }
+			}, [
 				E('option', { 'value': 'auto', 'selected': profile.settings.proxyDefault === 'auto' ? 'selected' : null }, 'auto（自动测速最快节点）')
 			].concat(choices.map(function(c) {
 				return E('option', {
@@ -232,7 +235,8 @@ return view.extend({
 
 			var listNodesChk = E('input', {
 				'type': 'checkbox',
-				'checked': profile.settings.listNodesInProxy ? 'checked' : null
+				'checked': profile.settings.listNodesInProxy ? 'checked' : null,
+				'change': function() { profile.settings.listNodesInProxy = !!listNodesChk.checked; }
 			});
 
 			proxyBox.innerHTML = '';

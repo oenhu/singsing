@@ -384,10 +384,7 @@ return view.extend({
 	handleSaveApply: function() {
 		if (!this._map) return Promise.resolve();
 		return this._map.save().then(function() {
-			return uci.changes();
-		}).then(function(changes) {
-			var hasUci = changes && Object.keys(changes).length > 0;
-			return hasUci ? uci.apply() : Promise.resolve();
+			return api.applyUciIfChanged();
 		}).then(function() {
 			return api.applyWithNotify();
 		});

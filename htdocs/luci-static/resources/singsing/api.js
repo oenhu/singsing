@@ -309,10 +309,18 @@ function generateAndApply() {
 	});
 }
 
+function applyUciIfChanged() {
+	return uci.save().then(function() {
+		return uci.changes();
+	}).then(function(changes) {
+		return (changes && Object.keys(changes).length > 0) ? uci.apply() : Promise.resolve();
+	});
+}
+
 function switchActiveProfile(name) {
 	return uci.load('singsing').then(function() {
 		uci.set('singsing', 'main', 'active_profile', name);
-		return uci.save().then(function() { return uci.apply(); });
+		return applyUciIfChanged();
 	});
 }
 
@@ -411,5 +419,6 @@ return baseclass.extend({
 	loadActiveProfile: loadActiveProfile,
 	buildCurrentConfig: buildCurrentConfig,
 	generateAndApply: generateAndApply,
-	applyWithNotify: applyWithNotify
+	applyWithNotify: applyWithNotify,
+	applyUciIfChanged: applyUciIfChanged
 });

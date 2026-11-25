@@ -257,9 +257,7 @@ return view.extend({
 			uci.set('singsing', 'subscription', 'auto_update', autoUpdChk.checked ? '1' : '0');
 			uci.set('singsing', 'subscription', 'update_interval', intervalSel.value);
 			uci.set('singsing', 'subscription', 'auto_apply', autoApplyChk.checked ? '1' : '0');
-			uci.save().then(function() {
-				return uci.apply();
-			}).then(function() {
+			api.applyUciIfChanged().then(function() {
 				return api.syncCron();
 			}).then(function(r) {
 				if (r && r.ok) notify(true, '定时自动更新设置已保存并同步到系统 cron');
@@ -290,8 +288,7 @@ return view.extend({
 			uci.set('singsing', 'subscription', 'auto_update', autoUpdChk.checked ? '1' : '0');
 			uci.set('singsing', 'subscription', 'update_interval', intervalSel.value);
 			uci.set('singsing', 'subscription', 'auto_apply', autoApplyChk.checked ? '1' : '0');
-			return uci.save()
-				.then(function() { return uci.apply(); })
+			return api.applyUciIfChanged()
 				.then(function() { return api.saveSubscriptions(JSON.stringify(subs, null, 2)); })
 				.then(function() { return api.saveProfile(loaded.name, profile); })
 				.then(function() { return api.syncCron(); })
