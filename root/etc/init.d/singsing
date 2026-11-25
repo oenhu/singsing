@@ -5,7 +5,7 @@ START=99
 STOP=10
 
 PROG_MGR="/usr/share/singsing/service-manager.sh"
-SB_CONFIG="/etc/sing-box/config.json"
+SB_CONFIG="/etc/singsing/sing-box.json"
 
 boot() {
 	local auto_start
@@ -47,6 +47,7 @@ start_service() {
 	fi
 
 	"$PROG_MGR" ensure_dirs
+	"$PROG_MGR" disable_stock_singbox >/dev/null 2>&1 || true
 
 	if [ "${SINGSING_FROM_APPLY:-0}" != "1" ]; then
 		# Auto-download missing local rule-sets on boot/manual start
@@ -69,6 +70,7 @@ start_service() {
 	[ -f "/etc/capabilities/singsing.json" ] && \
 		procd_set_param capabilities "/etc/capabilities/singsing.json"
 	procd_set_param respawn 3600 5 5
+	procd_set_param no_new_privs 1
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param limits core="unlimited" nofile="65536 65536"

@@ -61,7 +61,7 @@ return view.extend({
 
 			if (!filtered.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '7', 'style': 'text-align:center;color:#666;' }, '暂无活跃连接')
+					E('td', { 'class': 'td', 'colspan': '7', 'style': 'text-align:center;opacity:0.7;' }, '暂无活跃连接')
 				]));
 			} else {
 				filtered.slice(0, 200).forEach(function(c) {
@@ -131,6 +131,7 @@ return view.extend({
 				E('button', {
 					'class': 'btn cbi-button-reset',
 					'click': function() {
+						if (!window.confirm('确定断开当前所有活跃连接吗？')) return;
 						api.clashCloseAllConnections().then(refresh);
 					}
 				}, '断开全部连接')

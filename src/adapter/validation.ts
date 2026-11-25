@@ -172,6 +172,13 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
     if (tun.autoRedirect && !tun.autoRoute) {
       err("开启 Auto Redirect 时必须同时开启 Auto Route（sing-box 原生要求）");
     }
+    for (const ex of tun.routeExcludeAddress || []) {
+      const trimmed = ex.trim();
+      if (!trimmed) continue;
+      if (!isValidCidr(trimmed, 4) && !isValidCidr(trimmed, 6)) {
+        err(`TUN 绕过网段格式无效（需为 IPv4 或 IPv6 CIDR）：${trimmed}`);
+      }
+    }
   }
 
   if (!paths.cacheFile.trim().startsWith("/")) {

@@ -219,6 +219,20 @@ return view.extend({
 		o.datatype = 'range(576,65535)';
 		o.placeholder = '留空使用核心默认';
 
+		o = s.option(form.Value, 'route_exclude_address', '绕过 TUN 的网段（可选）', '从 TUN 自动路由中排除的 IPv4/IPv6 CIDR 网段，多个用逗号分隔（例如 192.168.100.0/24, 10.8.0.0/16）');
+		o.placeholder = '例如 192.168.100.0/24';
+		o.validate = function(section_id, value) {
+			var v = String(value || '').trim();
+			if (!v) return true;
+			var items = v.split(/[\s,]+/).map(function(x) { return x.trim(); }).filter(Boolean);
+			for (var i = 0; i < items.length; i++) {
+				if (!engine.isValidCidr(items[i], 4) && !engine.isValidCidr(items[i], 6)) {
+					return '无效的 CIDR 网段格式：' + items[i];
+				}
+			}
+			return true;
+		};
+
 		return m.render().then(function(mapEl) {
 			// 4. 自定义分域 DNS 解析规则
 			var rulesWrap = E('div', { 'class': 'cbi-section', 'style': 'margin-top:16px;' });
@@ -303,6 +317,10 @@ return view.extend({
 									errDiv.textContent = '域名格式有误：' + parsed.invalid.map(function(x) { return x.entry + '（' + x.reason + '）'; }).join('、');
 									return;
 								}
+								if (srvSel.value === 'tailnet' && !tsSel.value) {
+									errDiv.textContent = '请先前往 Tailscale 页面添加至少一个 Tailnet 网络';
+									return;
+								}
 								if (srvSel.value === 'custom') {
 									var cRes = engine.customDnsServer(customArea.value, 'dns-rule-test', null);
 									if (cRes.error) {
@@ -359,6 +377,7 @@ return view.extend({
 								E('button', {
 									'class': 'btn cbi-button-remove',
 									'click': function() {
+										if (!window.confirm('确定删除这条自定义 DNS 规则吗？')) return;
 										profile.settings.dnsRules = profile.settings.dnsRules.filter(function(x) { return x.id !== r.id; });
 										saveRules('已删除自定义 DNS 规则');
 									}

@@ -39,8 +39,11 @@ export function nodeFingerprint(node: ProxyNode): string {
   const parsed = nodeObject(node);
   const o = parsed.object as Record<string, unknown> | undefined;
   if (!o) return `raw:${node.tag}`;
+  const firstPeer = Array.isArray(o.peers) ? (o.peers[0] as Record<string, unknown> | undefined) : undefined;
+  const srv = String(o.server ?? firstPeer?.address ?? "");
+  const prt = String(o.server_port ?? firstPeer?.port ?? "");
   const cred = String(o.uuid ?? o.password ?? o.private_key ?? o.username ?? "");
-  return `${String(o.type ?? "")}|${String(o.server ?? "")}|${String(o.server_port ?? "")}|${cred}`;
+  return `${String(o.type ?? "")}|${srv}|${prt}|${cred}`;
 }
 
 /**

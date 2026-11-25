@@ -29,7 +29,7 @@ return view.extend({
 		var notify = function(ok, text) {
 			statusBar.innerHTML = '';
 			statusBar.appendChild(E('div', {
-				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
+				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#166534' : '#991b1b') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
 			}, text));
 		};
 
@@ -90,12 +90,12 @@ return view.extend({
 			var renderSets = function() {
 				setsListEl.innerHTML = '';
 				if (!sets.length) {
-					setsListEl.appendChild(E('span', { 'style': 'font-size:12px;color:#666;' }, '未添加规则集'));
+					setsListEl.appendChild(E('span', { 'style': 'font-size:12px;opacity:0.7;' }, '未添加规则集'));
 					return;
 				}
 				sets.forEach(function(ref, idx) {
 					setsListEl.appendChild(E('span', {
-						'style': 'display:inline-flex;align-items:center;gap:4px;padding:3px 8px;margin:2px 4px 2px 0;background:#eef2ff;border:1px solid #c7d2fe;border-radius:4px;font-size:12px;'
+						'style': 'display:inline-flex;align-items:center;gap:4px;padding:3px 8px;margin:2px 4px 2px 0;background:#eef2ff;color:#1e3a8a;border:1px solid #c7d2fe;border-radius:4px;font-size:12px;'
 					}, [
 						ref.source + ' (' + ref.content + ')',
 						E('a', {
@@ -237,7 +237,7 @@ return view.extend({
 			];
 			if (!rules.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;color:#666;' }, '暂无自定义路由规则（按顺序匹配，优先级高于默认代理列表与分流模式）。')
+					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;opacity:0.7;' }, '暂无自定义路由规则（按顺序匹配，优先级高于默认代理列表与分流模式）。')
 				]));
 			} else {
 				rules.forEach(function(r, idx) {
@@ -256,6 +256,7 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									if (!window.confirm('确定删除这条自定义路由规则吗？')) return;
 									profile.settings.rules = profile.settings.rules.filter(function(x) { return x.id !== r.id; });
 									persist('已删除路由规则');
 								}
@@ -439,7 +440,7 @@ return view.extend({
 			];
 			if (!ac.deviceRules.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;color:#666;' }, '暂无设备独立出口规则（可为特定设备如 Apple TV / 游戏机指定专属代理组或直连）。')
+					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;opacity:0.7;' }, '暂无设备独立出口规则（可为特定设备如 Apple TV / 游戏机指定专属代理组或直连）。')
 				]));
 			} else {
 				ac.deviceRules.forEach(function(dr) {
@@ -454,6 +455,7 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									if (!window.confirm('确定删除设备规则「' + (dr.name || dr.outbound) + '」吗？')) return;
 									ac.deviceRules = ac.deviceRules.filter(function(x) { return x.id !== dr.id; });
 									persistAccess('已删除设备规则');
 								}

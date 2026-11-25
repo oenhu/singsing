@@ -100,6 +100,11 @@ return view.extend({
 				statCard('代理上游 DNS', remoteLabel),
 				statCard('dnsmasq 接管', curSt.dnsmasq_taken_over ? ('已接管 (127.0.0.1#' + curSt.listen_port + ')') : '未接管', curSt.dnsmasq_taken_over ? '#16a34a' : null)
 			]));
+			if (curSt.offload_warning) {
+				gridContainer.appendChild(E('div', {
+					'style': 'margin:6px 0 10px 0;padding:8px 12px;border-radius:6px;background:#fffbeb;color:#92400e;border:1px solid #fcd34d;font-size:12px;'
+				}, '提示：' + curSt.offload_warning));
+			}
 		};
 
 		var renderClashPanel = function(curSt) {

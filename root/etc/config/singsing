@@ -31,6 +31,7 @@ config tun 'tun'
 	option strict_route '1'
 	option ipv6 '1'
 	option mtu ''
+	option route_exclude_address ''
 
 config subscription 'subscription'
 	option auto_update '0'

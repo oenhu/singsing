@@ -31,7 +31,7 @@ return view.extend({
 		var notify = function(ok, text) {
 			statusBar.innerHTML = '';
 			statusBar.appendChild(E('div', {
-				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
+				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#166534' : '#991b1b') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
 			}, text));
 		};
 
@@ -290,7 +290,7 @@ return view.extend({
 
 			if (!groups.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;color:#666;' }, '暂无自定义代理组（默认已内置 proxy 手动选择器与 auto 自动测速组）。')
+					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;opacity:0.7;' }, '暂无自定义代理组（默认已内置 proxy 手动选择器与 auto 自动测速组）。')
 				]));
 			} else {
 				groups.forEach(function(g) {
@@ -306,6 +306,7 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									if (!window.confirm('确定删除代理组「' + g.tag + '」吗？')) return;
 									profile.groups = profile.groups.filter(function(x) { return x.id !== g.id; });
 									persist('已删除代理组「' + g.tag + '」');
 								}
@@ -329,7 +330,10 @@ return view.extend({
 				E('button', {
 					'class': 'btn cbi-button-add',
 					'click': function() {
-						var used = (profile.groups || []).map(function(g) { return g.tag; });
+						var used = ['proxy', 'auto', 'direct', 'local', 'remote', 'tun-in', 'dns-in']
+							.concat((profile.groups || []).map(function(g) { return g.tag; }))
+							.concat((profile.nodes || []).map(function(n) { return n.tag; }))
+							.concat((profile.settings.tailnets || []).map(function(t) { return t.tag; }));
 						openGroupModal(engine.newGroup({ tag: engine.freshTag('group', used) }), true);
 					}
 				}, '新增代理组')

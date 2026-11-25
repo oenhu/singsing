@@ -1,6 +1,6 @@
 'use strict';
 
-import { readfile, writefile, stat, unlink, rename, popen, lsdir, chmod } from 'fs';
+import { readfile, writefile, stat, unlink, rename, popen, lsdir, chmod, mkdir } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_DIR = '/etc/singsing';
@@ -10,7 +10,7 @@ const RULESET_URLS_FILE = `${CONF_DIR}/ruleset-urls.json`;
 const SUBS_FILE = `${CONF_DIR}/subscriptions.json`;
 const ACCESS_FILE = `${CONF_DIR}/access-control.json`;
 const DNSMASQ_BACKUP = `${CONF_DIR}/dnsmasq-backup.json`;
-const SB_CONFIG = '/etc/sing-box/config.json';
+const SB_CONFIG = `${CONF_DIR}/sing-box.json`;
 const TMP_NEW_CONFIG = '/tmp/singsing/config.new.json';
 const SERVICE_MGR = '/usr/share/singsing/service-manager.sh';
 const SUB_UPDATER = '/usr/share/singsing/subscription-updater.uc';
@@ -18,6 +18,32 @@ const INIT_SCRIPT = '/etc/init.d/singsing';
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 let tmpSeq = 0;
+
+function safeJson(raw) {
+	if (type(raw) != 'string') return null;
+	let s = trim(raw);
+	if (length(s) == 0) return null;
+	try {
+		return json(s);
+	} catch (e) {
+		return null;
+	}
+}
+
+function safeJsonLastLine(raw) {
+	let direct = safeJson(raw);
+	if (direct != null) return direct;
+	if (type(raw) != 'string') return null;
+	let lines = split(trim(raw), '\n');
+	for (let i = length(lines) - 1; i >= 0; i--) {
+		let l = trim(lines[i]);
+		if (substr(l, 0, 1) == '{' || substr(l, 0, 1) == '[') {
+			let p = safeJson(l);
+			if (p != null) return p;
+		}
+	}
+	return null;
+}
 
 function writeFileSafe(path, data, mode) {
 	let payload = (type(data) == 'string') ? data : ('' + (data ?? ''));
@@ -79,7 +105,7 @@ function getRulesetDir(c) {
 }
 
 function sanitizeManifest(raw, c) {
-	let arr = (type(raw) == 'string') ? json(raw) : raw;
+	let arr = (type(raw) == 'string') ? safeJson(raw) : raw;
 	if (type(arr) != 'array') return null;
 	let dir = getRulesetDir(c);
 	let out = [];
@@ -136,10 +162,28 @@ function isDnsmasqTakenOver() {
 	return false;
 }
 
+function getOffloadWarning() {
+	let c = cursor();
+	let items = [];
+	c.load('firewall');
+	if (c.get('firewall', '@defaults[0]', 'flow_offloading_hw') == '1')
+		push(items, 'firewall 硬件流量卸载');
+	else if (c.get('firewall', '@defaults[0]', 'flow_offloading') == '1')
+		push(items, 'firewall 软件流量卸载');
+
+	c.load('turboacc');
+	let fp = trim('' + (c.get('turboacc', 'config', 'fastpath') || ''));
+	if (length(fp) > 0 && fp != 'none' && fp != '0')
+		push(items, `TurboACC (${fp})`);
+
+	if (length(items) == 0) return '';
+	return `检测到系统已开启流量卸载：${join(' + ', items)}。启用 TUN 透明代理时可能导致部分连接绕过分流或流量统计不准，如遇异常建议在防火墙 / TurboACC 中关闭加速。`;
+}
+
 function getLanDev() {
 	let u = runCmd(`ubus call network.interface.lan status 2>/dev/null`);
 	if (u.code == 0 && length(u.output) > 0) {
-		let d = json(u.output);
+		let d = safeJson(u.output);
 		let dev = d?.l3_device || d?.device;
 		if (type(dev) == 'string' && match(dev, /^[a-zA-Z0-9_.:-]+$/))
 			return dev;
@@ -160,7 +204,7 @@ function getLanIps() {
 
 	let u = runCmd(`ubus call network.interface dump 2>/dev/null`);
 	if (u.code == 0 && length(u.output) > 0) {
-		let d = json(u.output);
+		let d = safeJson(u.output);
 		for (let ifc in (d?.interface || [])) {
 			if (ifc.interface == 'loopback') continue;
 			for (let k in ['ipv4-address', 'ipv6-address']) {
@@ -185,7 +229,7 @@ function getLanIps() {
 function getServicePid() {
 	let u = runCmd(`ubus call service list '{"name":"singsing"}' 2>/dev/null`);
 	if (u.code == 0 && length(u.output) > 0) {
-		let parsed = json(u.output);
+		let parsed = safeJson(u.output);
 		let inst = parsed?.['singsing']?.instances?.['singsing'];
 		if (inst && inst.running && inst.pid)
 			return int(inst.pid);
@@ -213,7 +257,7 @@ function parseSemverOk(verStr) {
 function getClashApiConfig() {
 	let raw = readfile(SB_CONFIG);
 	if (!raw) return null;
-	let cfg = json(raw);
+	let cfg = safeJson(raw);
 	let api = cfg?.experimental?.clash_api;
 	if (!api || !api.external_controller) return null;
 
@@ -284,7 +328,8 @@ const methods = {
 				local_dns: c.get('singsing', 'dns', 'local_server') || '',
 				local_dns_type: c.get('singsing', 'dns', 'local_type') || 'udp',
 				listen_port: int(c.get('singsing', 'dns', 'listen_port') || '5335'),
-				lan_ips: getLanIps()
+				lan_ips: getLanIps(),
+				offload_warning: getOffloadWarning()
 			};
 		}
 	},
@@ -305,8 +350,8 @@ const methods = {
 			let path = `${PROFILES_DIR}/${name}.json`;
 			let raw = readfile(path);
 			if (!raw) return { ok: true, exists: false, profile: null };
-			let parsed = json(raw);
-			if (!parsed) return { ok: false, error: 'Corrupted profile JSON' };
+			let parsed = safeJson(raw);
+			if (type(parsed) != 'object') return { ok: false, error: 'Corrupted profile JSON' };
 			return { ok: true, exists: true, profile: parsed };
 		}
 	},
@@ -317,8 +362,8 @@ const methods = {
 			let name = safeProfileName(req.args.name || 'default');
 			if (!name) return { ok: false, error: 'Invalid profile name' };
 			if (type(req.args.profile) != 'string') return { ok: false, error: 'Profile payload must be JSON string' };
-			let parsed = json(req.args.profile);
-			if (!parsed) return { ok: false, error: 'Invalid JSON payload' };
+			let parsed = safeJson(req.args.profile);
+			if (type(parsed) != 'object') return { ok: false, error: 'Invalid JSON payload' };
 
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 			let path = `${PROFILES_DIR}/${name}.json`;
@@ -346,6 +391,15 @@ const methods = {
 			let name = safeProfileName(req.args.name);
 			if (!name || name == 'default') return { ok: false, error: 'Cannot delete default or invalid profile' };
 			unlink(`${PROFILES_DIR}/${name}.json`);
+
+			// Clean up subscriptions bound to this deleted profile
+			let subsRaw = readfile(SUBS_FILE);
+			let subs = subsRaw ? safeJson(subsRaw) : null;
+			if (type(subs) == 'array') {
+				let kept = filter(subs, (s) => (s?.profile || 'default') != name);
+				if (length(kept) != length(subs))
+					writeFileSafe(SUBS_FILE, sprintf('%.2J', kept), 0600);
+			}
 			return { ok: true };
 		}
 	},
@@ -354,20 +408,77 @@ const methods = {
 		args: { config: 'string' },
 		call: function(req) {
 			if (type(req.args.config) != 'string') return { ok: false, error: 'Missing config JSON' };
+			let cfg = safeJson(req.args.config);
+			if (type(cfg) != 'object')
+				return { ok: false, output: '无效的 JSON 配置内容' };
+
+			let c = getUci();
+			let bin = getSingboxBin(c);
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			let tmpPath = `/tmp/singsing/validate.${time()}.${++tmpSeq}.json`;
-			if (!writeFileSafe(tmpPath, req.args.config, 0600))
+
+			let seqId = `${time()}.${++tmpSeq}`;
+			let tmpPath = `/tmp/singsing/validate.${seqId}.json`;
+			let stubDir = `/tmp/singsing/validate-rs.${seqId}`;
+			let missingTags = [];
+
+			// Provide temporary stubs for local rule-sets not yet downloaded so pre-flight syntax check works offline
+			if (type(cfg.route?.rule_set) == 'array') {
+				let needBinaryStub = false;
+				for (let rs in cfg.route.rule_set) {
+					if (type(rs) == 'object' && rs.type == 'local' && type(rs.path) == 'string') {
+						let st = stat(rs.path);
+						if (!st || st.size == 0) {
+							push(missingTags, '' + (rs.tag || rs.path));
+							if (rs.format != 'source') needBinaryStub = true;
+						}
+					}
+				}
+				if (length(missingTags) > 0) {
+					mkdir(stubDir, 0700);
+					let stubJson = `${stubDir}/stub.json`;
+					let stubSrs = `${stubDir}/stub.srs`;
+					writefile(stubJson, '{"version":3,"rules":[{"domain_suffix":["example.invalid"]}]}');
+					if (needBinaryStub && stat(bin)) {
+						runCmd(`${shellQuote(bin)} rule-set compile ${shellQuote(stubJson)} -o ${shellQuote(stubSrs)}`);
+					}
+					for (let rs in cfg.route.rule_set) {
+						if (type(rs) == 'object' && rs.type == 'local' && type(rs.path) == 'string') {
+							let st = stat(rs.path);
+							if (!st || st.size == 0) {
+								rs.path = (rs.format == 'source') ? stubJson : stubSrs;
+							}
+						}
+					}
+				}
+			}
+
+			let toWrite = length(missingTags) > 0 ? sprintf('%.2J', cfg) : req.args.config;
+			if (!writeFileSafe(tmpPath, toWrite, 0600)) {
+				if (length(missingTags) > 0) runCmd(`rm -rf ${shellQuote(stubDir)}`);
 				return { ok: false, error: 'Failed to write temporary config' };
+			}
+
 			let res = runCmd(`${SERVICE_MGR} validate_config ${shellQuote(tmpPath)}`);
 			unlink(tmpPath);
-			return { ok: res.code == 0, output: res.output };
+			if (length(missingTags) > 0) runCmd(`rm -rf ${shellQuote(stubDir)}`);
+
+			let note = '';
+			if (res.code == 0 && length(missingTags) > 0) {
+				note = `（提示：本地尚缺 ${length(missingTags)} 个规则集 [${join(', ', missingTags)}]，首次启动或应用时将自动下载）`;
+			}
+			return {
+				ok: res.code == 0,
+				missing_rulesets: missingTags,
+				output: trim((res.output || '') + (note ? ('\n' + note) : ''))
+			};
 		}
 	},
 
 	apply_config: {
 		args: { config: 'string', manifest: 'string' },
 		call: function(req) {
-			if (type(req.args.config) != 'string') return { ok: false, error: 'Missing config JSON' };
+			if (type(req.args.config) != 'string' || type(safeJson(req.args.config)) != 'object')
+				return { ok: false, error: 'Missing or invalid config JSON' };
 			let c = getUci();
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
 
@@ -432,7 +543,8 @@ const methods = {
 				listen_port: port,
 				port_in_use: portBusy,
 				lan_ips: lanIps,
-				dnsmasq_taken_over: isDnsmasqTakenOver()
+				dnsmasq_taken_over: isDnsmasqTakenOver(),
+				offload_warning: getOffloadWarning()
 			};
 		}
 	},
@@ -471,7 +583,7 @@ const methods = {
 	get_ruleset_urls: {
 		call: function() {
 			let raw = readfile(RULESET_URLS_FILE);
-			let parsed = raw ? json(raw) : null;
+			let parsed = raw ? safeJson(raw) : null;
 			return { ok: true, urls: (type(parsed) == 'object') ? parsed : {} };
 		}
 	},
@@ -480,7 +592,7 @@ const methods = {
 		args: { urls: '', manifest: '' },
 		call: function(req) {
 			let c = getUci();
-			let parsed = json(req.args.urls || '{}');
+			let parsed = safeJson(req.args.urls || '{}');
 			if (type(parsed) != 'object')
 				return { ok: false, error: 'Invalid URLs map' };
 			for (let k, v in parsed) {
@@ -515,8 +627,8 @@ const methods = {
 				writeFileSafe(MANIFEST_FILE, sprintf('%.2J', cleanManifest), 0600);
 			}
 			let res = runCmd(`${SERVICE_MGR} update_rulesets ${shellQuote(tag)}`);
-			let parsed = json(res.output);
-			if (parsed) return parsed;
+			let parsed = safeJsonLastLine(res.output);
+			if (type(parsed) == 'object') return parsed;
 			return { ok: res.code == 0, output: res.output };
 		}
 	},
@@ -550,7 +662,7 @@ const methods = {
 			if (m == 'PUT' && match(p, /^\/configs(\/|\?|$)/))
 				return { ok: false, error: '禁止通过代理重载外部配置文件' };
 			if (m == 'PATCH' && match(p, /^\/configs(\/|\?|$)/)) {
-				let patchObj = json(req.args.body || '{}');
+				let patchObj = safeJson(req.args.body || '{}');
 				if (type(patchObj) != 'object' || type(patchObj.mode) != 'string')
 					return { ok: false, error: 'PATCH /configs 仅允许切换 mode' };
 				req.args.body = sprintf('%J', { mode: patchObj.mode });
@@ -577,7 +689,7 @@ const methods = {
 			} else if (match(res.output, /^[0-9]{3}$/)) {
 				statusCode = int(res.output);
 			}
-			let data = length(trim(bodyStr)) > 0 ? json(bodyStr) : null;
+			let data = length(trim(bodyStr)) > 0 ? safeJson(bodyStr) : null;
 
 			return {
 				ok: statusCode >= 200 && statusCode < 300,
@@ -591,7 +703,7 @@ const methods = {
 	get_subscriptions: {
 		call: function() {
 			let raw = readfile(SUBS_FILE);
-			let parsed = raw ? json(raw) : [];
+			let parsed = raw ? safeJson(raw) : [];
 			return { ok: true, subscriptions: (type(parsed) == 'array') ? parsed : [] };
 		}
 	},
@@ -599,7 +711,7 @@ const methods = {
 	save_subscriptions: {
 		args: { subscriptions: '' },
 		call: function(req) {
-			let parsed = json(req.args.subscriptions || '[]');
+			let parsed = safeJson(req.args.subscriptions || '[]');
 			if (type(parsed) != 'array')
 				return { ok: false, error: 'Invalid subscriptions array' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);
@@ -644,9 +756,9 @@ const methods = {
 			if (length(id) > 0 && !match(id, /^[a-zA-Z0-9_-]{1,64}$/))
 				return { ok: false, error: 'Invalid subscription id' };
 			let res = runCmd(`${SUB_UPDATER} ${shellQuote(id)}`);
-			let parsed = json(res.output);
-			if (parsed) return parsed;
-			return { ok: res.code == 0, output: res.output };
+			let parsed = safeJsonLastLine(res.output);
+			if (type(parsed) == 'object') return parsed;
+			return { ok: res.code == 0, error: res.output || '订阅更新器执行失败', output: res.output };
 		}
 	},
 
@@ -702,13 +814,19 @@ const methods = {
 			}
 
 			unlink(partPath);
-			if (fmt == 'source' && json(combined) == null)
+			if (fmt == 'source' && type(safeJson(combined)) != 'object')
 				return { ok: false, error: 'JSON 规则集格式无效' };
 
 			if (!writeFileSafe(dest, combined, 0644))
 				return { ok: false, error: '写入规则集文件失败：' + dest };
 
-			return { ok: true, path: dest, size: length(combined) };
+			let reloaded = false;
+			if (getServicePid() > 0) {
+				runCmd(`${SERVICE_MGR} reload_if_running`);
+				reloaded = true;
+			}
+
+			return { ok: true, path: dest, size: length(combined), reloaded: reloaded };
 		}
 	},
 
@@ -756,7 +874,7 @@ const methods = {
 	get_access_control: {
 		call: function() {
 			let raw = readfile(ACCESS_FILE);
-			let parsed = raw ? json(raw) : null;
+			let parsed = raw ? safeJson(raw) : null;
 			if (type(parsed) != 'object') {
 				parsed = { mode: 'all', clients: [], deviceRules: [] };
 			}
@@ -767,7 +885,7 @@ const methods = {
 	save_access_control: {
 		args: { data: '' },
 		call: function(req) {
-			let parsed = json(req.args.data || '{}');
+			let parsed = safeJson(req.args.data || '{}');
 			if (type(parsed) != 'object')
 				return { ok: false, error: 'Invalid access control JSON' };
 			runCmd(`${SERVICE_MGR} ensure_dirs`);

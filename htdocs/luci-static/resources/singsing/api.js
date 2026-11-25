@@ -219,6 +219,13 @@ function readOpenWrtSettings(lanIps) {
 		};
 		var mtuRaw = uci.get('singsing', 'tun', 'mtu');
 		var mtu = (mtuRaw && /^\d+$/.test(String(mtuRaw).trim())) ? parseInt(mtuRaw, 10) : null;
+		var exRaw = uci.get('singsing', 'tun', 'route_exclude_address');
+		var routeExcludes = [];
+		if (Array.isArray(exRaw)) {
+			routeExcludes = exRaw.map(function(x) { return String(x || '').trim(); }).filter(Boolean);
+		} else if (typeof exRaw === 'string' && exRaw.trim()) {
+			routeExcludes = exRaw.split(/[\s,]+/).map(function(x) { return x.trim(); }).filter(Boolean);
+		}
 
 		return {
 			dns: {
@@ -242,7 +249,7 @@ function readOpenWrtSettings(lanIps) {
 				strictRoute: bool('tun', 'strict_route', true),
 				ipv6: bool('tun', 'ipv6', true),
 				mtu: mtu,
-				routeExcludeAddress: []
+				routeExcludeAddress: routeExcludes
 			},
 			paths: {
 				cacheFile: get('main', 'cache_file', '/tmp/singsing/cache.db'),

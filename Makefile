@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI support for sing-box (based on riverscn/singbox-confgen)
-LUCI_DEPENDS:=+luci-base +rpcd +rpcd-mod-ucode +ucode +ucode-mod-fs +ucode-mod-uci +kmod-tun +kmod-nft-tproxy +firewall4 +ca-bundle +curl
+LUCI_DEPENDS:=+luci-base +rpcd +rpcd-mod-ucode +ucode +ucode-mod-fs +ucode-mod-uci +kmod-tun +kmod-nft-tproxy +kmod-nft-queue +kmod-nft-nat +firewall4 +ca-bundle +curl
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-singsing

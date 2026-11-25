@@ -9,10 +9,10 @@ CONF_DIR="/etc/singsing"
 PROFILES_DIR="$CONF_DIR/profiles"
 DNSMASQ_BACKUP="$CONF_DIR/dnsmasq-backup.json"
 MANIFEST_FILE="$CONF_DIR/rulesets-manifest.json"
+SB_CONFIG="$CONF_DIR/sing-box.json"
+SB_LAST_GOOD="$CONF_DIR/sing-box.last-good.json"
 
 SB_DIR="/etc/sing-box"
-SB_CONFIG="$SB_DIR/config.json"
-SB_LAST_GOOD="$SB_DIR/config.last-good.json"
 
 TMP_DIR="/tmp/singsing"
 TMP_NEW_CONFIG="$TMP_DIR/config.new.json"
@@ -37,6 +37,49 @@ ensure_dirs() {
 	chmod 700 "$CONF_DIR" "$PROFILES_DIR" "$ts_root" 2>/dev/null || true
 	[ -f "$SB_CONFIG" ] && chmod 600 "$SB_CONFIG" 2>/dev/null || true
 	chmod 755 "$TMP_DIR" "$TMP_DL_DIR" 2>/dev/null || true
+}
+
+disable_stock_singbox() {
+	if [ -x /etc/init.d/sing-box ]; then
+		if [ "$(uci -q get sing-box.main.enabled 2>/dev/null)" = "1" ]; then
+			uci -q set sing-box.main.enabled='0' && uci -q commit sing-box 2>/dev/null || true
+		fi
+		/etc/init.d/sing-box stop >/dev/null 2>&1 || true
+		/etc/init.d/sing-box disable >/dev/null 2>&1 || true
+	fi
+}
+
+is_port_listening() {
+	local port="$1"
+	if command -v ss >/dev/null 2>&1; then
+		if ss -Hlntu 2>/dev/null | awk -v p=":$port" '$5 ~ p "$" {found=1; exit} END {exit !found}'; then
+			return 0
+		fi
+	fi
+	if command -v netstat >/dev/null 2>&1; then
+		if netstat -lntu 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" {found=1; exit} END {exit !found}'; then
+			return 0
+		fi
+	fi
+	return 1
+}
+
+wait_port_listening() {
+	local port="$1"
+	local timeout="${2:-5}"
+	local i=0
+	if ! command -v ss >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
+		sleep 1
+		return 0
+	fi
+	while [ "$i" -lt "$timeout" ]; do
+		if is_port_listening "$port"; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
 }
 
 check_local_dns() {
@@ -174,6 +217,7 @@ dnsmasq_takeover() {
 	tmp_file="${conf_file}.tmp.$$"
 	{
 		printf '# Managed by luci-app-singsing (RAM drop-in, zero flash write)\n'
+		printf 'no-poll\n'
 		printf 'no-resolv\n'
 		if [ -z "$main_conf" ] || ! grep -q '^cache-size=' "$main_conf" 2>/dev/null; then
 			printf 'cache-size=0\n'
@@ -196,6 +240,7 @@ dnsmasq_takeover() {
 	fi
 
 	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+	wait_port_listening 53 5 || true
 }
 
 dnsmasq_restore() {
@@ -237,6 +282,7 @@ dnsmasq_restore() {
 
 	if [ "$changed" -eq 1 ]; then
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+		wait_port_listening 53 5 || true
 	fi
 }
 
@@ -425,7 +471,8 @@ get_service_pid() {
 	if command -v ubus >/dev/null 2>&1 && command -v ucode >/dev/null 2>&1; then
 		pid="$(ubus call service list '{"name":"singsing"}' 2>/dev/null | ucode -e '
 			import { stdin } from "fs";
-			let d = json(stdin.read("all") || "{}");
+			let d = null;
+			try { d = json(stdin.read("all") || "{}"); } catch (e) { d = null; }
 			let inst = d?.["singsing"]?.instances?.["singsing"];
 			if (inst && inst.running && inst.pid) print(inst.pid);
 		' 2>/dev/null || true)"
@@ -433,19 +480,17 @@ get_service_pid() {
 	printf '%s' "$pid"
 }
 
-is_port_listening() {
-	local port="$1"
-	if command -v ss >/dev/null 2>&1; then
-		if ss -Hlntu 2>/dev/null | awk -v p=":$port" '$5 ~ p "$" {found=1; exit} END {exit !found}'; then
-			return 0
+reload_if_running() {
+	[ -n "$(get_service_pid)" ] || return 0
+	(
+		flock -x -n 200 || exit 0
+		if [ -n "$(get_service_pid)" ]; then
+			SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1 || true
+			if wait_dns_ready 8; then
+				dnsmasq_takeover
+			fi
 		fi
-	fi
-	if command -v netstat >/dev/null 2>&1; then
-		if netstat -lntu 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" {found=1; exit} END {exit !found}'; then
-			return 0
-		fi
-	fi
-	return 1
+	) 200>"$LOCK_FILE"
 }
 
 wait_dns_ready() {
@@ -526,7 +571,8 @@ apply_config() {
 			chmod 600 "$SB_LAST_GOOD" 2>/dev/null || true
 		fi
 
-		# 4. Atomically install new config
+		# 4. Atomically install new config and ensure stock sing-box init does not collide
+		disable_stock_singbox >/dev/null 2>&1 || true
 		mv -f "$TMP_NEW_CONFIG" "$SB_CONFIG"
 		chmod 600 "$SB_CONFIG" 2>/dev/null || true
 
@@ -648,19 +694,21 @@ cron_sync() {
 }
 
 case "${1:-}" in
-	ensure_dirs)      ensure_dirs ;;
-	check_local_dns)  check_local_dns "${2:-}" ;;
-	dnsmasq_takeover) dnsmasq_takeover ;;
-	dnsmasq_restore)  dnsmasq_restore ;;
-	ensure_rulesets)  ensure_rulesets ;;
-	update_rulesets)  update_rulesets "${2:-}" ;;
-	validate_config)  validate_config "${2:-$TMP_NEW_CONFIG}" ;;
-	wait_dns_ready)   wait_dns_ready "${2:-10}" ;;
-	apply_config)     apply_config ;;
-	cron_sync)        cron_sync ;;
-	cron_remove)      cron_remove ;;
+	ensure_dirs)            ensure_dirs ;;
+	disable_stock_singbox)  disable_stock_singbox ;;
+	check_local_dns)        check_local_dns "${2:-}" ;;
+	dnsmasq_takeover)       dnsmasq_takeover ;;
+	dnsmasq_restore)        dnsmasq_restore ;;
+	ensure_rulesets)        ensure_rulesets ;;
+	update_rulesets)        update_rulesets "${2:-}" ;;
+	reload_if_running)      reload_if_running ;;
+	validate_config)        validate_config "${2:-$TMP_NEW_CONFIG}" ;;
+	wait_dns_ready)         wait_dns_ready "${2:-10}" ;;
+	apply_config)           apply_config ;;
+	cron_sync)              cron_sync ;;
+	cron_remove)            cron_remove ;;
 	*)
-		printf 'Usage: %s {ensure_dirs|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|validate_config|wait_dns_ready|apply_config|cron_sync|cron_remove}\n' "$0" >&2
+		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|reload_if_running|validate_config|wait_dns_ready|apply_config|cron_sync|cron_remove}\n' "$0" >&2
 		exit 1
 		;;
 esac

@@ -55,7 +55,7 @@ return view.extend({
 		var showMsg = function(ok, text) {
 			msgBox.innerHTML = '';
 			msgBox.appendChild(E('div', {
-				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
+				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#166534' : '#991b1b') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
 			}, text));
 		};
 
@@ -138,7 +138,7 @@ return view.extend({
 					};
 					sendChunk(0).then(function(res) {
 						ui.hideModal();
-						showMsg(true, '规则集「' + it.tag + '」离线上传成功（' + formatBytes(res.size) + '），保存至 ' + res.path);
+						showMsg(true, '规则集「' + it.tag + '」离线上传成功（' + formatBytes(res.size) + '），保存至 ' + res.path + (res.reloaded ? '（已自动重载运行中的 sing-box）' : ''));
 						reloadList();
 					}).catch(function(err) {
 						ui.hideModal();
@@ -165,7 +165,7 @@ return view.extend({
 			var errDiv = E('div', { 'style': 'color:#dc2626;font-size:12px;margin-top:6px;' });
 
 			ui.showModal('修改规则集在线下载地址：' + it.tag, [
-				E('div', { 'style': 'margin-bottom:8px;font-size:12px;color:#555;' }, [
+				E('div', { 'style': 'margin-bottom:8px;font-size:12px;opacity:0.75;' }, [
 					'默认地址：',
 					E('code', { 'style': 'word-break:break-all;' }, defUrl)
 				]),
@@ -228,7 +228,7 @@ return view.extend({
 
 			if (!items.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '6', 'style': 'text-align:center;color:#666;' }, '当前配置未引用任何外部规则集。')
+					E('td', { 'class': 'td', 'colspan': '6', 'style': 'text-align:center;opacity:0.7;' }, '当前配置未引用任何外部规则集。')
 				]));
 			} else {
 				items.forEach(function(it) {
@@ -241,12 +241,12 @@ return view.extend({
 								E('strong', {}, it.tag),
 								isCustom ? E('span', { 'style': 'margin-left:6px;font-size:11px;padding:1px 5px;border-radius:3px;background:#dbeafe;color:#1d4ed8;' }, '自定义源') : ''
 							]),
-							E('div', { 'style': 'font-size:11px;color:#666;' }, desc)
+							E('div', { 'style': 'font-size:11px;opacity:0.7;' }, desc)
 						]),
 						E('td', { 'class': 'td' }, E('span', { 'style': 'color:' + (it.exists ? '#16a34a' : '#dc2626') + ';font-weight:600;' }, it.exists ? '已就绪' : '缺失')),
 						E('td', { 'class': 'td', 'style': 'font-size:12px;' }, [
 							E('div', {}, formatBytes(it.size)),
-							E('div', { 'style': 'color:#666;font-size:11px;' }, formatTime(it.mtime))
+							E('div', { 'style': 'opacity:0.7;font-size:11px;' }, formatTime(it.mtime))
 						]),
 						E('td', { 'class': 'td', 'style': 'font-family:monospace;font-size:11px;max-width:260px;word-break:break-all;' }, it.url || '-'),
 						E('td', { 'class': 'td', 'style': 'font-family:monospace;font-size:11px;' }, it.path || '-'),

@@ -15,6 +15,12 @@ return view.extend({
 		var engine = loaded.engine;
 		var profileName = loaded.name;
 		var searchQuery = '';
+		var allUsedTags = function() {
+			return RESERVED_TAGS
+				.concat(profile.nodes.map(function(x) { return x.tag; }))
+				.concat((profile.groups || []).map(function(g) { return g.tag; }))
+				.concat((profile.settings.tailnets || []).map(function(t) { return t.tag; }));
+		};
 
 		this._saveFn = function() {
 			return api.saveProfile(profileName, profile).then(function(res) {
@@ -255,7 +261,7 @@ return view.extend({
 							E('button', {
 								'class': 'btn',
 								'click': function() {
-									var used = RESERVED_TAGS.concat(profile.nodes.map(function(x) { return x.tag; }));
+									var used = allUsedTags();
 									var copy = engine.newNode({
 										tag: engine.freshTag(n.tag, used),
 										body: n.body,
@@ -269,6 +275,7 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									if (!window.confirm('确定删除节点「' + n.tag + '」吗？')) return;
 									profile.nodes = profile.nodes.filter(function(x) { return x.id !== n.id; });
 									persist('已删除节点「' + n.tag + '」');
 								}
@@ -310,7 +317,7 @@ return view.extend({
 					'class': 'btn cbi-button-add',
 					'click': function() {
 						var tpl = engine.TEMPLATES.find(function(t) { return t.id === tplSelect.value; }) || engine.TEMPLATES[0];
-						var used = RESERVED_TAGS.concat(profile.nodes.map(function(n) { return n.tag; }));
+						var used = allUsedTags();
 						var node = engine.newNode({
 							tag: engine.freshTag(tpl.tagPrefix, used),
 							body: tpl.body

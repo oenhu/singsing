@@ -31,8 +31,11 @@ return view.extend({
 				' ｜ dns-in 端口 = ', E('code', {}, String(d.listen_port || 5335)),
 				'（', d.port_in_use ? '已监听' : '未监听', '）',
 				' ｜ dnsmasq = ', d.dnsmasq_taken_over ? '已接管' : '未接管',
-				' ｜ 路由器 LAN IP = ', E('code', {}, (d.lan_ips && d.lan_ips.length) ? d.lan_ips.join(', ') : '-')
+				' ｜ 路由器接口 IP = ', E('code', {}, (d.lan_ips && d.lan_ips.length) ? d.lan_ips.join(', ') : '-')
 			]));
+			if (d.offload_warning) {
+				diagBox.appendChild(E('div', { 'style': 'margin-top:6px;font-size:12px;color:#d97706;' }, '⚠️ ' + d.offload_warning));
+			}
 		};
 
 		var refresh = function() {

@@ -1,6 +1,16 @@
 #!/bin/sh
 
 /usr/share/singsing/service-manager.sh ensure_dirs
+/usr/share/singsing/service-manager.sh disable_stock_singbox >/dev/null 2>&1 || true
+
+# Migrate existing singsing-generated config from legacy path if present
+if [ ! -s /etc/singsing/sing-box.json ] && [ -s /etc/sing-box/config.json ]; then
+	if grep -q '"dns-in"' /etc/sing-box/config.json 2>/dev/null; then
+		cp -f /etc/sing-box/config.json /etc/singsing/sing-box.json
+		chmod 600 /etc/singsing/sing-box.json 2>/dev/null || true
+	fi
+fi
+
 /etc/init.d/singsing enable >/dev/null 2>&1 || true
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/*
 

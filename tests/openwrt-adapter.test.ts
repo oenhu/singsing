@@ -323,6 +323,24 @@ describe("TUN, localized rule-sets, and flash-friendly paths", () => {
     expect(issues.some((i) => i.level === "error" && i.detail.includes("Auto Redirect"))).toBe(true);
   });
 
+  it("propagates tun.routeExcludeAddress and rejects invalid exclude CIDRs", () => {
+    const okCfg = generateOpenWrtConfig(
+      blueprintProfile(),
+      validSettings({ tun: { ...defaultOpenWrtSettings().tun, routeExcludeAddress: ["192.168.100.0/24", "fd00:10::/48"] } }),
+    ).config as any;
+    expect(validateSchema(okCfg)).toBe(true);
+    expect(okCfg.inbounds.find((i: any) => i.tag === "tun-in").route_exclude_address).toEqual([
+      "192.168.100.0/24",
+      "fd00:10::/48",
+    ]);
+
+    const badIssues = validateOpenWrt(
+      blueprintProfile(),
+      validSettings({ tun: { ...defaultOpenWrtSettings().tun, routeExcludeAddress: ["not-a-cidr"] } }),
+    );
+    expect(badIssues.some((i) => i.level === "error" && i.detail.includes("绕过网段格式无效"))).toBe(true);
+  });
+
   it("applies custom per-tag rule-set URL overrides while keeping type=local in sing-box config", () => {
     const customUrl = "https://mirror.example.com/gfwlist.srs";
     const s = validSettings({

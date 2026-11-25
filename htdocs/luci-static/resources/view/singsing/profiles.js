@@ -30,7 +30,7 @@ return view.extend({
 		var notify = function(ok, text) {
 			statusBar.innerHTML = '';
 			statusBar.appendChild(E('div', {
-				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
+				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#166534' : '#991b1b') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
 			}, text));
 		};
 
@@ -56,6 +56,10 @@ return view.extend({
 							var name = nameInput.value.trim();
 							if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) {
 								errDiv.textContent = '名称仅支持 1-64 位字母、数字、-、_';
+								return;
+							}
+							if (profiles.indexOf(name) >= 0) {
+								errDiv.textContent = '配置方案「' + name + '」已存在，请使用其他名称';
 								return;
 							}
 							var payload = cloneFromCurrent ? loaded.profile : engine.blueprintProfile();
@@ -91,6 +95,7 @@ return view.extend({
 							try {
 								var raw = JSON.parse(area.value);
 								var normalized = engine.normalizeProfile(raw);
+								if (!window.confirm('确定用导入内容覆盖当前方案「' + activeName + '」吗？')) return;
 								api.saveProfile(activeName, normalized).then(function(res) {
 									if (res && res.ok) {
 										ui.hideModal();
@@ -122,7 +127,7 @@ return view.extend({
 			ui.showModal('核心配置校验', [E('p', { 'class': 'spinning' }, '正在调用路由器 sing-box check 校验...')]);
 			api.validateConfig(JSON.stringify(built.result.config, null, 2)).then(function(res) {
 				ui.hideModal();
-				if (res && res.ok) notify(true, 'sing-box check 校验通过！');
+				if (res && res.ok) notify(true, 'sing-box check 校验通过！' + (res.output ? ('\n' + res.output) : ''));
 				else notify(false, 'sing-box check 未通过：\n' + ((res && (res.output || res.error)) || '未知错误'));
 			});
 		};
@@ -150,6 +155,7 @@ return view.extend({
 					(!isActive && name !== 'default') ? E('button', {
 						'class': 'btn cbi-button-remove',
 						'click': function() {
+							if (!window.confirm('确定删除配置方案「' + name + '」及其绑定的订阅吗？')) return;
 							api.deleteProfile(name).then(reloadPage);
 						}
 					}, '删除') : ''

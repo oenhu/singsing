@@ -23,10 +23,21 @@ return view.extend({
 	},
 
 	render: function(data) {
-		var subs = (data[1] && Array.isArray(data[1].subscriptions)) ? data[1].subscriptions : [];
+		var allSubs = (data[1] && Array.isArray(data[1].subscriptions)) ? data[1].subscriptions : [];
 		var loaded = data[2];
 		var profile = loaded.profile;
 		var engine = loaded.engine;
+		var activeProfileName = loaded.name || 'default';
+
+		var isCurrentProf = function(s) {
+			return ((s && s.profile) || 'default') === activeProfileName;
+		};
+		var otherSubs = allSubs.filter(function(s) { return !isCurrentProf(s); });
+		var subs = allSubs.filter(isCurrentProf);
+		var saveMergedSubs = function() {
+			var combined = otherSubs.concat(subs);
+			return api.saveSubscriptions(JSON.stringify(combined, null, 2));
+		};
 
 		var statusBar = E('div', { 'style': 'margin-top:10px;' });
 		var tableWrap = E('div', { 'class': 'cbi-section', 'style': 'margin-top:12px;' });
@@ -39,7 +50,7 @@ return view.extend({
 		};
 
 		var persistSubs = function(msg) {
-			return api.saveSubscriptions(JSON.stringify(subs, null, 2)).then(function(res) {
+			return saveMergedSubs().then(function(res) {
 				if (res && res.ok) notify(true, msg || '订阅列表已保存');
 				else notify(false, '保存失败：' + ((res && res.error) || '未知错误'));
 				renderTable();
@@ -53,7 +64,7 @@ return view.extend({
 					sub.lastUpdated = Math.floor(Date.now() / 1000);
 					sub.lastStatus = 'error';
 					sub.lastError = (res && res.error) || '下载失败（已保留旧节点）';
-					return api.saveSubscriptions(JSON.stringify(subs, null, 2)).then(function() {
+					return saveMergedSubs().then(function() {
 						ui.hideModal();
 						notify(false, '订阅「' + sub.name + '」更新失败：' + sub.lastError);
 						renderTable();
@@ -72,7 +83,7 @@ return view.extend({
 					sub.lastUpdated = Math.floor(Date.now() / 1000);
 					sub.lastStatus = 'error';
 					sub.lastError = importErr || '未解析到有效节点（已保留旧节点）';
-					return api.saveSubscriptions(JSON.stringify(subs, null, 2)).then(function() {
+					return saveMergedSubs().then(function() {
 						ui.hideModal();
 						notify(false, '订阅「' + sub.name + '」解析失败：' + sub.lastError);
 						renderTable();
@@ -84,7 +95,7 @@ return view.extend({
 					sub.lastUpdated = Math.floor(Date.now() / 1000);
 					sub.lastStatus = 'error';
 					sub.lastError = '过滤后剩余 0 个节点，已保留旧节点防止清空';
-					return api.saveSubscriptions(JSON.stringify(subs, null, 2)).then(function() {
+					return saveMergedSubs().then(function() {
 						ui.hideModal();
 						notify(false, '订阅「' + sub.name + '」：' + sub.lastError);
 						renderTable();
@@ -92,6 +103,7 @@ return view.extend({
 				}
 
 				profile.nodes = merged.nodes;
+				sub.profile = activeProfileName;
 				sub.lastUpdated = Math.floor(Date.now() / 1000);
 				sub.lastStatus = 'ok';
 				sub.lastError = '';
@@ -99,7 +111,7 @@ return view.extend({
 
 				return Promise.all([
 					api.saveProfile(loaded.name, profile),
-					api.saveSubscriptions(JSON.stringify(subs, null, 2))
+					saveMergedSubs()
 				]).then(function(saveRes) {
 					ui.hideModal();
 					if (!saveRes[0] || !saveRes[0].ok || !saveRes[1] || !saveRes[1].ok) {
@@ -147,7 +159,7 @@ return view.extend({
 				E('div', { 'style': 'max-height:70vh;overflow:auto;padding-right:4px;' }, [
 					field('订阅名称', nameInput),
 					field('订阅地址 (URL)', urlInput),
-					field('User-Agent', uaInput, '默认 sing-box/1.14，可按服务商要求改为 clash.meta 等'),
+					field('User-Agent', uaInput, '默认 sing-box/1.14；页面「立即更新」支持 Clash YAML，若开启后台定时更新请保持返回 sing-box JSON / SIP008 / Base64 链接的 UA'),
 					field('包含关键词（可选）', incInput),
 					field('排除关键词（可选）', excInput),
 					field('正则筛选（可选）', rxInput),
@@ -171,6 +183,7 @@ return view.extend({
 							if (!/^https?:\/\/\S+$/i.test(url)) { errDiv.textContent = '请输入有效的 http:// 或 https:// 订阅地址'; return; }
 							var draft = Object.assign({}, sub, {
 								id: sub.id || genId(),
+								profile: activeProfileName,
 								name: name,
 								url: url,
 								userAgent: uaInput.value.trim() || 'sing-box/1.14',
@@ -235,13 +248,14 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									if (!window.confirm('确定删除订阅「' + sub.name + '」及其关联节点吗？')) return;
 									var prevSubs = subs.slice();
 									var prevNodes = profile.nodes.slice();
 									subs = subs.filter(function(x) { return x.id !== sub.id; });
 									profile.nodes = profile.nodes.filter(function(n) { return n.subId !== sub.id; });
 									Promise.all([
 										api.saveProfile(loaded.name, profile),
-										api.saveSubscriptions(JSON.stringify(subs, null, 2))
+										saveMergedSubs()
 									]).then(function(r) {
 										if (!r[0] || !r[0].ok || !r[1] || !r[1].ok) {
 											subs = prevSubs;
@@ -301,10 +315,15 @@ return view.extend({
 					api.getSubscriptions(),
 					api.loadActiveProfile()
 				]).then(function(r) {
-					if (r[0] && Array.isArray(r[0].subscriptions)) subs = r[0].subscriptions;
 					if (r[1] && r[1].profile) {
 						loaded = r[1];
 						profile = r[1].profile;
+						activeProfileName = loaded.name || 'default';
+					}
+					if (r[0] && Array.isArray(r[0].subscriptions)) {
+						allSubs = r[0].subscriptions;
+						otherSubs = allSubs.filter(function(s) { return !isCurrentProf(s); });
+						subs = allSubs.filter(isCurrentProf);
 					}
 					renderTable();
 				});
@@ -319,7 +338,7 @@ return view.extend({
 			uci.set('singsing', 'subscription', 'update_interval', intervalSel.value);
 			uci.set('singsing', 'subscription', 'auto_apply', autoApplyChk.checked ? '1' : '0');
 			return api.applyUciIfChanged()
-				.then(function() { return api.saveSubscriptions(JSON.stringify(subs, null, 2)); })
+				.then(function() { return saveMergedSubs(); })
 				.then(function(r1) {
 					if (!r1 || !r1.ok) throw new Error((r1 && r1.error) || '保存订阅列表失败');
 					return api.saveProfile(loaded.name, profile);

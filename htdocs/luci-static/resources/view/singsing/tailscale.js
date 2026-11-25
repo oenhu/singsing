@@ -47,7 +47,7 @@ return view.extend({
 		var notify = function(ok, text) {
 			statusBar.innerHTML = '';
 			statusBar.appendChild(E('div', {
-				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
+				'style': 'padding:8px 12px;border-radius:4px;background:' + (ok ? '#f0fdf4' : '#fef2f2') + ';color:' + (ok ? '#166534' : '#991b1b') + ';border:1px solid ' + (ok ? '#86efac' : '#fca5a5') + ';white-space:pre-wrap;font-size:13px;'
 			}, text));
 		};
 
@@ -72,7 +72,7 @@ return view.extend({
 				return E('div', { 'style': 'margin-bottom:10px;' }, [
 					E('label', { 'style': 'display:block;font-weight:600;margin-bottom:3px;font-size:13px;' }, label),
 					el,
-					desc ? E('div', { 'style': 'font-size:11px;color:#666;margin-top:2px;' }, desc) : ''
+					desc ? E('div', { 'style': 'font-size:11px;opacity:0.75;margin-top:2px;' }, desc) : ''
 				]);
 			};
 
@@ -188,6 +188,17 @@ return view.extend({
 								errDiv.textContent = '端点标签不能为空';
 								return;
 							}
+							if (['proxy', 'auto', 'direct', 'local', 'remote', 'tun-in', 'dns-in'].indexOf(tag) >= 0) {
+								errDiv.textContent = '标签「' + tag + '」为系统保留名称，请换一个';
+								return;
+							}
+							var dup = (profile.settings.tailnets || []).some(function(x) { return x.id !== ts.id && x.tag === tag; }) ||
+								(profile.nodes || []).some(function(n) { return n.tag === tag; }) ||
+								(profile.groups || []).some(function(g) { return g.tag === tag; });
+							if (dup) {
+								errDiv.textContent = '标签「' + tag + '」已被其他 Tailnet、节点或代理组使用';
+								return;
+							}
 							var controlUrl = serverModeSel.value === 'custom' ? controlUrlInput.value.trim() : '';
 							if (serverModeSel.value === 'custom' && !/^https?:\/\/\S+$/i.test(controlUrl)) {
 								errDiv.textContent = '自定义控制服务器地址必须以 http:// 或 https:// 开头';
@@ -277,7 +288,7 @@ return view.extend({
 
 			if (!list.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '7', 'style': 'text-align:center;color:#666;' }, '暂未配置 Tailscale 网络。支持官方 Tailscale 与自建 Headscale 控制服务器，无需手动编写 JSON。')
+					E('td', { 'class': 'td', 'colspan': '7', 'style': 'text-align:center;opacity:0.7;' }, '暂未配置 Tailscale 网络。支持官方 Tailscale 与自建 Headscale 控制服务器，无需手动编写 JSON。')
 				]));
 			} else {
 				list.forEach(function(t) {
@@ -295,6 +306,7 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									if (!window.confirm('确定删除 Tailnet「' + t.tag + '」吗？')) return;
 									profile.settings.tailnets = profile.settings.tailnets.filter(function(x) { return x.id !== t.id; });
 									persist('已删除 Tailnet「' + t.tag + '」');
 								}
@@ -317,7 +329,10 @@ return view.extend({
 				E('button', {
 					'class': 'btn cbi-button-add',
 					'click': function() {
-						var used = (profile.settings.tailnets || []).map(function(t) { return t.tag; });
+						var used = ['proxy', 'auto', 'direct', 'local', 'remote', 'tun-in', 'dns-in']
+							.concat((profile.settings.tailnets || []).map(function(t) { return t.tag; }))
+							.concat((profile.nodes || []).map(function(n) { return n.tag; }))
+							.concat((profile.groups || []).map(function(g) { return g.tag; }));
 						var tag = engine.freshTag('ts', used);
 						openTailnetModal(engine.newTailnet({
 							tag: tag,
