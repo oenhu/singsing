@@ -322,7 +322,7 @@ wait_dns_ready() {
 apply_config() {
 	ensure_dirs
 	(
-		flock -x -w 30 200 || {
+		flock -x -n 200 || {
 			printf 'Another apply operation is already in progress\n' >&2
 			exit 1
 		}
