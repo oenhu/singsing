@@ -1,0 +1,101 @@
+{
+	"admin/services/singsing": {
+		"title": "Sing-Box",
+		"order": 30,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-singsing" ],
+			"uci": { "singsing": true }
+		}
+	},
+	"admin/services/singsing/overview": {
+		"title": "运行概览",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "singsing/overview"
+		}
+	},
+	"admin/services/singsing/settings": {
+		"title": "基本设置",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "singsing/settings"
+		}
+	},
+	"admin/services/singsing/nodes": {
+		"title": "节点管理",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "singsing/nodes"
+		}
+	},
+	"admin/services/singsing/subscriptions": {
+		"title": "订阅管理",
+		"order": 32,
+		"action": {
+			"type": "view",
+			"path": "singsing/subscriptions"
+		}
+	},
+	"admin/services/singsing/groups": {
+		"title": "代理组管理",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "singsing/groups"
+		}
+	},
+	"admin/services/singsing/routing": {
+		"title": "路由分流",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "singsing/routing"
+		}
+	},
+	"admin/services/singsing/tailscale": {
+		"title": "Tailscale",
+		"order": 45,
+		"action": {
+			"type": "view",
+			"path": "singsing/tailscale"
+		}
+	},
+	"admin/services/singsing/rulesets": {
+		"title": "规则集管理",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "singsing/rulesets"
+		}
+	},
+	"admin/services/singsing/profiles": {
+		"title": "配置管理",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "singsing/profiles"
+		}
+	},
+	"admin/services/singsing/connections": {
+		"title": "连接管理",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "singsing/connections"
+		}
+	},
+	"admin/services/singsing/logs": {
+		"title": "运行日志",
+		"order": 65,
+		"action": {
+			"type": "view",
+			"path": "singsing/logs"
+		}
+	}
+}

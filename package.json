@@ -1,0 +1,23 @@
+{
+  "name": "luci-app-singsing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenWrt LuCI application for sing-box configuration generation and management based on riverscn/singbox-confgen",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build:engine": "node scripts/build-engine.mjs",
+    "build": "npm run typecheck && npm run build:engine"
+  },
+  "dependencies": {
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ajv": "^8.17.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

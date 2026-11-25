@@ -1,0 +1,142 @@
+name: Build & Package luci-app-singsing
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and build LuCI engine bundle
+        run: npm run build
+
+      - name: Run unit and sing-box 1.14.3 schema tests
+        run: npm test
+
+      - name: Verify shell, JSON, and LuCI JS syntax
+        run: |
+          sh -n root/usr/share/singsing/service-manager.sh
+          sh -n root/etc/init.d/singsing
+          sh -n root/etc/uci-defaults/99-singsing
+          node -e '
+            const fs = require("fs");
+            for (const f of [
+              "root/usr/share/luci/menu.d/luci-app-singsing.json",
+              "root/usr/share/rpcd/acl.d/luci-app-singsing.json",
+              "root/etc/capabilities/singsing.json"
+            ]) {
+              JSON.parse(fs.readFileSync(f, "utf8"));
+            }
+            const jsFiles = [
+              "htdocs/luci-static/resources/singsing/api.js",
+              ...fs.readdirSync("htdocs/luci-static/resources/view/singsing")
+                .map(f => "htdocs/luci-static/resources/view/singsing/" + f)
+            ];
+            for (const f of jsFiles) {
+              new Function(fs.readFileSync(f, "utf8"));
+            }
+            console.log("All JSON and LuCI JS files valid:", jsFiles.length);
+          '
+
+      - name: Upload built engine bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-bundle
+          path: htdocs/luci-static/resources/singsing/engine-bundle.js
+
+  package-openwrt:
+    needs: test-and-verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: openwrt-24.10-ipk
+            sdk_url: https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            ext: ipk
+          - name: openwrt-snapshot-apk
+            sdk_url: https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            ext: apk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built engine bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-bundle
+          path: htdocs/luci-static/resources/singsing
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd rsync file gawk unzip git build-essential
+
+      - name: Download and extract OpenWrt SDK
+        run: |
+          mkdir -p /tmp/sdk
+          curl -fsSL "${{ matrix.sdk_url }}" | tar --zstd -xf - --strip-components=1 -C /tmp/sdk
+
+      - name: Prepare feeds and package source
+        run: |
+          cd /tmp/sdk
+          ./scripts/feeds update luci
+          ./scripts/feeds install -a -p luci
+          mkdir -p package/luci-app-singsing
+          rsync -a \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='tests' \
+            --exclude='src' \
+            --exclude='scripts' \
+            "${{ github.workspace }}/" package/luci-app-singsing/
+
+      - name: Compile luci-app-singsing
+        run: |
+          cd /tmp/sdk
+          make defconfig
+          make package/luci-app-singsing/compile V=s
+          mkdir -p "${{ github.workspace }}/release-artifacts"
+          find bin/packages -type f \( -name 'luci-app-singsing*.ipk' -o -name 'luci-app-singsing*.apk' \) \
+            -exec cp -v {} "${{ github.workspace }}/release-artifacts/" \;
+          ls -lh "${{ github.workspace }}/release-artifacts/"
+
+      - name: Upload OpenWrt package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: release-artifacts/*
+
+  release:
+    needs: package-openwrt
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/**/*.ipk
+            dist/**/*.apk

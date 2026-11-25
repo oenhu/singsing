@@ -1,0 +1,44 @@
+{
+	"luci-app-singsing": {
+		"description": "Grant access to Sing-Box ConfGen LuCI application",
+		"read": {
+			"uci": [ "singsing", "dhcp" ],
+			"ubus": {
+				"luci.singsing": [
+					"status",
+					"get_profile",
+					"list_profiles",
+					"dns_check",
+					"ruleset_status",
+					"get_ruleset_urls",
+					"get_subscriptions",
+					"get_access_control",
+					"get_lan_clients",
+					"connectivity_check",
+					"get_logs"
+				]
+			}
+		},
+		"write": {
+			"uci": [ "singsing" ],
+			"ubus": {
+				"luci.singsing": [
+					"save_profile",
+					"delete_profile",
+					"validate_config",
+					"apply_config",
+					"service_action",
+					"ruleset_update",
+					"ruleset_upload",
+					"save_ruleset_urls",
+					"save_subscriptions",
+					"save_access_control",
+					"fetch_subscription",
+					"sync_cron",
+					"run_subscription_updater",
+					"clash_api"
+				]
+			}
+		}
+	}
+}
