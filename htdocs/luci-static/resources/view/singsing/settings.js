@@ -21,6 +21,7 @@ return view.extend({
 
 		m = new form.Map('singsing', '基本设置',
 			'统一配置 sing-box 核心运行参数、直连与代理 DNS（必填直连上游 DNS，局域网域名由 dnsmasq 直接解析），以及原生 TUN + Auto Redirect 透明代理。');
+		this._map = m;
 
 		// ---------------------------------------------------------------
 		// 1. 核心与运行设置
@@ -369,5 +370,30 @@ return view.extend({
 			mapEl.appendChild(rulesWrap);
 			return mapEl;
 		});
+	},
+
+	handleSave: function() {
+		if (!this._map) return Promise.resolve();
+		return this._map.save().then(function() {
+			return uci.save();
+		}).then(function() {
+			ui.addNotification(null, E('p', '基本设置已保存'), 'info');
+		});
+	},
+
+	handleSaveApply: function() {
+		if (!this._map) return Promise.resolve();
+		return this._map.save().then(function() {
+			return uci.changes();
+		}).then(function(changes) {
+			var hasUci = changes && Object.keys(changes).length > 0;
+			return hasUci ? uci.apply() : Promise.resolve();
+		}).then(function() {
+			return api.applyWithNotify();
+		});
+	},
+
+	handleReset: function() {
+		window.location.reload();
 	}
 });
