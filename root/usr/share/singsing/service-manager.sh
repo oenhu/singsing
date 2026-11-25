@@ -144,12 +144,12 @@ download_file() {
 
 	rm -f "$tmp_file"
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --connect-timeout 15 --max-time 90 -o "$tmp_file" "$eff_url" 2>/dev/null || {
+		curl -fsSL --connect-timeout 6 --max-time 15 -o "$tmp_file" "$eff_url" 2>/dev/null || {
 			rm -f "$tmp_file"
 			return 1
 		}
 	elif command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -T 30 -O "$tmp_file" "$eff_url" 2>/dev/null || {
+		uclient-fetch -q -T 15 -O "$tmp_file" "$eff_url" 2>/dev/null || {
 			rm -f "$tmp_file"
 			return 1
 		}
@@ -365,9 +365,16 @@ apply_config() {
 		mv -f "$TMP_NEW_CONFIG" "$SB_CONFIG"
 		chmod 600 "$SB_CONFIG" 2>/dev/null || true
 
-		# 5. Enable and restart service
-		uci -q set singsing.main.enabled='1'
-		uci -q commit singsing
+		# 5. Restart service only when enabled=1; if disabled, ensure stopped & dnsmasq restored
+		local enabled_flag
+		enabled_flag="$(uci_get "main.enabled" "0")"
+		if [ "$enabled_flag" != "1" ]; then
+			/etc/init.d/singsing stop >/dev/null 2>&1 || true
+			dnsmasq_restore
+			rm -f "$TX_FILE"
+			exit 0
+		fi
+
 		/etc/init.d/singsing restart >/dev/null 2>&1
 
 		# 6. Health check

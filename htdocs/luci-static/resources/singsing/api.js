@@ -359,23 +359,32 @@ function clashCloseAllConnections() {
 }
 
 function applyWithNotify() {
-	ui.showModal('保存并应用', [E('p', { 'class': 'spinning' }, '正在生成配置、校验并重启 sing-box...')]);
-	return generateAndApply().then(function(res) {
-		ui.hideModal();
-		if (res && res.validationErrors && res.validationErrors.length) {
-			var lines = res.validationErrors.map(function(e) { return '• ' + e.message; }).join('\n');
-			ui.addNotification('配置校验未通过，已保存但未应用', E('pre', { 'style': 'white-space:pre-wrap;' }, lines), 'danger');
-		} else if (res && res.ok) {
-			ui.addNotification(null, E('p', '配置已保存并成功应用到 sing-box'), 'info');
-		} else if (res && res.rolled_back) {
-			ui.addNotification('启动失败已自动回滚', E('pre', { 'style': 'white-space:pre-wrap;' }, res.output || ''), 'warning');
-		} else {
-			ui.addNotification('应用配置失败', E('pre', { 'style': 'white-space:pre-wrap;' }, (res && (res.error || res.output)) || '未知错误'), 'danger');
+	return uci.load('singsing').then(function() {
+		var enabled = uci.get('singsing', 'main', 'enabled') === '1';
+		if (!enabled) {
+			return callServiceAction('stop').catch(function() { return null; }).then(function() {
+				ui.addNotification(null, E('p', '配置已保存（当前「启用服务」未开启，未启动 sing-box）'), 'info');
+				return { ok: true, skipped_start: true };
+			});
 		}
-		return res;
-	}).catch(function(err) {
-		ui.hideModal();
-		ui.addNotification('应用配置异常', E('p', String(err)), 'danger');
+		ui.showModal('保存并应用', [E('p', { 'class': 'spinning' }, '正在生成配置、校验并重启 sing-box...')]);
+		return generateAndApply().then(function(res) {
+			ui.hideModal();
+			if (res && res.validationErrors && res.validationErrors.length) {
+				var lines = res.validationErrors.map(function(e) { return '• ' + e.message; }).join('\n');
+				ui.addNotification('配置校验未通过，已保存但未应用', E('pre', { 'style': 'white-space:pre-wrap;' }, lines), 'danger');
+			} else if (res && res.ok) {
+				ui.addNotification(null, E('p', '配置已保存并成功应用到 sing-box'), 'info');
+			} else if (res && res.rolled_back) {
+				ui.addNotification('启动失败已自动回滚', E('pre', { 'style': 'white-space:pre-wrap;' }, res.output || ''), 'warning');
+			} else {
+				ui.addNotification('应用配置失败', E('pre', { 'style': 'white-space:pre-wrap;' }, (res && (res.error || res.output)) || '未知错误'), 'danger');
+			}
+			return res;
+		}).catch(function(err) {
+			ui.hideModal();
+			ui.addNotification('应用配置异常', E('p', String(err)), 'danger');
+		});
 	});
 }
 
