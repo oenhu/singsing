@@ -408,7 +408,7 @@ update_rulesets() {
 	ensure_dirs
 
 	(
-		flock -x -n 200 || {
+		flock -x -n 9 || {
 			printf '{"ok":false,"updated":[],"failed":[],"error":"Another apply or update operation is in progress"}\n'
 			exit 1
 		}
@@ -452,7 +452,7 @@ update_rulesets() {
 			printf("%J\n", { ok: ok, updated: updated, failed: failed });
 			exit(ok ? 0 : 1);
 		'
-	) 200>"$LOCK_FILE"
+	) 9>"$LOCK_FILE"
 }
 
 validate_config() {
@@ -483,14 +483,14 @@ get_service_pid() {
 reload_if_running() {
 	[ -n "$(get_service_pid)" ] || return 0
 	(
-		flock -x -n 200 || exit 0
+		flock -x -n 9 || exit 0
 		if [ -n "$(get_service_pid)" ]; then
 			SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1 || true
 			if wait_dns_ready 8; then
 				dnsmasq_takeover
 			fi
 		fi
-	) 200>"$LOCK_FILE"
+	) 9>"$LOCK_FILE"
 }
 
 wait_dns_ready() {
@@ -522,7 +522,7 @@ wait_dns_ready() {
 apply_config() {
 	ensure_dirs
 	(
-		flock -x -n 200 || {
+		flock -x -n 9 || {
 			printf 'Another apply operation is already in progress\n' >&2
 			exit 1
 		}
@@ -603,7 +603,7 @@ apply_config() {
 		/etc/init.d/singsing stop >/dev/null 2>&1 || true
 		printf 'sing-box failed to start; dnsmasq restored for safety\n' >&2
 		exit 1
-	) 200>"$LOCK_FILE"
+	) 9>"$LOCK_FILE"
 }
 
 notify_cron() {
