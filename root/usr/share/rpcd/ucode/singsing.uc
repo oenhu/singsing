@@ -1,18 +1,16 @@
 'use strict';
 
-import { readfile, writefile, stat, unlink, rename, popen, lsdir, chmod, mkdir, mkdtemp, rmdir } from 'fs';
+import { readfile, writefile, stat, unlink, rename, popen, lsdir, chmod, mkdir, rmdir } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_DIR = '/etc/singsing';
 const PROFILES_DIR = `${CONF_DIR}/profiles`;
 const MANIFEST_FILE = `${CONF_DIR}/rulesets-manifest.json`;
 const RULESET_URLS_FILE = `${CONF_DIR}/ruleset-urls.json`;
-const SUBS_FILE = `${CONF_DIR}/subscriptions.json`;
 const ACCESS_FILE = `${CONF_DIR}/access-control.json`;
 const DNSMASQ_BACKUP = `${CONF_DIR}/dnsmasq-backup.json`;
 const SB_CONFIG = `${CONF_DIR}/sing-box.json`;
 const SERVICE_MGR = '/usr/share/singsing/service-manager.sh';
-const SUB_UPDATER = '/usr/share/singsing/subscription-updater.uc';
 const INIT_SCRIPT = '/etc/init.d/singsing';
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
@@ -391,15 +389,6 @@ const methods = {
 			let name = safeProfileName(req.args.name);
 			if (!name || name == 'default') return { ok: false, error: 'Cannot delete default or invalid profile' };
 			unlink(`${PROFILES_DIR}/${name}.json`);
-
-			// Clean up subscriptions bound to this deleted profile
-			let subsRaw = readfile(SUBS_FILE);
-			let subs = subsRaw ? safeJson(subsRaw) : null;
-			if (type(subs) == 'array') {
-				let kept = filter(subs, (s) => (s?.profile || 'default') != name);
-				if (length(kept) != length(subs))
-					writeFileSafe(SUBS_FILE, sprintf('%.2J', kept), 0600);
-			}
 			return { ok: true };
 		}
 	},
@@ -487,9 +476,11 @@ const methods = {
 					return { ok: false, error: 'Invalid rule-sets manifest' };
 			}
 
-			let workDir = mkdtemp('/tmp/singsing-apply.XXXXXX');
+			let workDirRes = runCmd("mktemp -d '/tmp/singsing-apply.XXXXXX'");
+			let workDir = (workDirRes.code == 0 && length(workDirRes.output) > 0) ? workDirRes.output : null;
 			if (!workDir)
 				return { ok: false, error: 'Failed to create candidate directory' };
+			chmod(workDir, 0700);
 			let configPath = `${workDir}/config.json`;
 			let manifestPath = `${workDir}/manifest.json`;
 			let response;
@@ -709,68 +700,6 @@ const methods = {
 				data: data,
 				raw: data == null ? bodyStr : ''
 			};
-		}
-	},
-
-	get_subscriptions: {
-		call: function() {
-			let raw = readfile(SUBS_FILE);
-			let parsed = raw ? safeJson(raw) : [];
-			return { ok: true, subscriptions: (type(parsed) == 'array') ? parsed : [] };
-		}
-	},
-
-	save_subscriptions: {
-		args: { subscriptions: '' },
-		call: function(req) {
-			let parsed = safeJson(req.args.subscriptions || '[]');
-			if (type(parsed) != 'array')
-				return { ok: false, error: 'Invalid subscriptions array' };
-			runCmd(`${SERVICE_MGR} ensure_dirs`);
-			if (!writeFileSafe(SUBS_FILE, req.args.subscriptions || '[]', 0600))
-				return { ok: false, error: 'Failed to save subscriptions.json' };
-			runCmd(`${SERVICE_MGR} cron_sync`);
-			return { ok: true };
-		}
-	},
-
-	fetch_subscription: {
-		args: { url: '', user_agent: '' },
-		call: function(req) {
-			let u = trim(req.args.url || '');
-			if (!match(u, /^https?:\/\/[^[:space:]]+$/))
-				return { ok: false, error: '订阅地址必须以 http:// 或 https:// 开头' };
-			let ua = trim(req.args.user_agent || '') || 'sing-box/1.14';
-			let cmd = '';
-			if (runCmd('command -v curl').code == 0) {
-				cmd = `curl -fsSL --proto '=http,https' --proto-redir '=http,https' --max-filesize 8388608 --connect-timeout 8 --max-time 20 -A ${shellQuote(ua)} ${shellQuote(u)}`;
-			} else {
-				cmd = `uclient-fetch -q -T 15 -U ${shellQuote(ua)} -O - ${shellQuote(u)}`;
-			}
-			let res = runCmd(cmd);
-			if (res.code != 0 || length(trim(res.output)) == 0)
-				return { ok: false, error: '下载订阅失败：' + (res.output || '空响应') };
-			return { ok: true, content: res.output };
-		}
-	},
-
-	sync_cron: {
-		call: function() {
-			let res = runCmd(`${SERVICE_MGR} cron_sync`);
-			return { ok: res.code == 0, output: res.output };
-		}
-	},
-
-	run_subscription_updater: {
-		args: { id: '' },
-		call: function(req) {
-			let id = trim(req.args.id || '');
-			if (length(id) > 0 && !match(id, /^[a-zA-Z0-9_-]{1,64}$/))
-				return { ok: false, error: 'Invalid subscription id' };
-			let res = runCmd(`${SUB_UPDATER} ${shellQuote(id)}`);
-			let parsed = safeJsonLastLine(res.output);
-			if (type(parsed) == 'object') return parsed;
-			return { ok: res.code == 0, error: res.output || '订阅更新器执行失败', output: res.output };
 		}
 	},
 

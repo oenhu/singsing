@@ -144,15 +144,14 @@ describe("LuCI client access control", () => {
     expect(h.calls.some(({ method }) => method === "save_access_control" || method === "apply_config")).toBe(false);
   });
 
-  it("documents current boundary: buildCurrentConfig falls back to all mode when get_access_control fails", async () => {
+  it("fails explicitly instead of falling back to all mode when get_access_control fails", async () => {
     const h = luci(profile());
     h.override("get_access_control", async () => { throw new Error("access control store unreadable"); });
-    const built = await h.api.buildCurrentConfig();
-    expect(built.settings.accessControl).toEqual({ mode: "all", clients: [], deviceRules: [] });
-    expect(built.result.issues.filter((i) => i.level === "error")).toEqual([]);
+    await expect(h.api.buildCurrentConfig()).rejects.toThrow(/access control store unreadable/);
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
   });
 
-  it("documents current boundary: all mode can save a stale invalid client list while apply still rejects it", async () => {
+  it("ignores an unused stale client list when mode is all across both save and apply", async () => {
     const h = luci(profile());
     const page = await h.view("routing");
     accessMode(page.root).value = "all";
@@ -161,9 +160,8 @@ describe("LuCI client access control", () => {
     expect(h.calls.some(({ method }) => method === "save_access_control")).toBe(true);
 
     const applyRes = await page.view.handleSaveApply();
-    expect(applyRes).toMatchObject({ ok: false });
-    expect(applyRes?.validationErrors?.map((e) => e.message).join(" ")).toMatch(/访问控制设备列表格式无效/);
-    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
+    expect(applyRes).toMatchObject({ ok: true });
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(true);
   });
 });
 
@@ -927,5 +925,19 @@ describe("LuCI Tailscale configuration", () => {
     expect(builtAfterClean.result.issues.some((i) => i.level === "warning" && i.detail.includes("选择的 tailnet 已删除"))).toBe(true);
     const cleanedDns = builtAfterClean.result.config.dns as { servers: Record<string, unknown>[] };
     expect(cleanedDns.servers).not.toContainEqual(expect.objectContaining({ tag: "office-dns" }));
+  });
+
+  it("blocks setting both exit_node and advertise_exit_node in the Tailscale modal and during apply", async () => {
+    const h = luci(profile());
+    const page = await h.view("tailscale");
+    await click(page.root, "新增 Tailnet");
+    const modal = h.modal();
+    const advExitLabel = find(modal, "label", (el) => el.textContent.includes("本机作为出口节点通告"));
+    find(advExitLabel, "input").checked = true;
+    find(modal, "input", (el) => String(el.attrs.placeholder).includes("出口节点名称")).value = "office-gw";
+    await click(modal, "保存 Tailnet");
+    expect(h.modal().textContent).toContain("exit_node");
+    expect(h.modal().textContent).toContain("advertise_exit_node");
+    expect(h.calls.some(({ method }) => method === "save_profile")).toBe(false);
   });
 });

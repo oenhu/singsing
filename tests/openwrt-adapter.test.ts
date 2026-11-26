@@ -4,10 +4,8 @@ import Ajv2020 from "ajv/dist/2020";
 import {
   defaultOpenWrtSettings,
   generateOpenWrtConfig,
-  mergeSubscriptionNodes,
   validateOpenWrt,
   type OpenWrtSettings,
-  type SubscriptionItem,
 } from "../src/adapter/index";
 import { blueprintProfile, newNode, newTailnet } from "../src/upstream/defaults";
 import { sampleProfiles } from "./samples";
@@ -362,57 +360,44 @@ describe("TUN, localized rule-sets, and flash-friendly paths", () => {
   });
 });
 
-describe("Subscription merge, filtering, deduplication, and stable node IDs", () => {
-  const baseSub: SubscriptionItem = {
-    id: "sub-a",
-    name: "Airport A",
-    url: "https://example.com/sub",
-    enabled: true,
-    userAgent: "sing-box/1.14",
-    downloadMode: "direct",
-    includeKeywords: "",
-    excludeKeywords: "剩余流量,过期",
-    regexFilter: "",
-    renamePrefix: "[A] ",
-    deduplicate: true,
-    inGroups: true,
-  };
-
-  it("preserves manual nodes, filters keywords, deduplicates, prefixes names, and keeps stable node IDs", () => {
+describe("Tailscale MagicDNS ordering and exit node validation", () => {
+  it("orders .lan NXDOMAIN before MagicDNS preferred_by and single-label NXDOMAIN after MagicDNS", () => {
     const p = blueprintProfile();
-    const manualNode = p.nodes[0];
-    const incoming1 = [
-      newNode({ id: "id-hk1", tag: "HK 01", body: JSON.stringify({ type: "trojan", server: "hk1.example.com", server_port: 443, password: "p1" }) }),
-      newNode({ id: "id-hk1-dup", tag: "HK 01 Copy", body: JSON.stringify({ type: "trojan", server: "hk1.example.com", server_port: 443, password: "p1" }) }),
-      newNode({ id: "id-info", tag: "剩余流量 100GB", body: JSON.stringify({ type: "trojan", server: "info.example.com", server_port: 443, password: "p2" }) }),
+    p.settings.tailnets = [
+      newTailnet({
+        tag: "ts-home",
+        magicDns: true,
+        endpoint: JSON.stringify({ state_directory: "ts-home", hostname: "router", accept_routes: true }),
+      }),
     ];
+    const { config, issues } = generateOpenWrtConfig(p, validSettings()) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config)).toBe(true);
 
-    const r1 = mergeSubscriptionNodes(p, baseSub, incoming1);
-    expect(r1.total).toBe(1);
-    const addedHk = r1.nodes.find((n) => n.subId === "sub-a")!;
-    expect(addedHk.tag).toBe("[A] HK 01");
-    expect(r1.nodes.some((n) => n.id === manualNode.id)).toBe(true);
+    const rules = config.dns.rules as any[];
+    const lanIdx = rules.findIndex((r) => r.action === "predefined" && Array.isArray(r.domain_suffix) && r.domain_suffix.includes(".lan"));
+    const magicIdx = rules.findIndex((r) => r.preferred_by === "ts-home-dns" && r.server === "ts-home-dns");
+    const singleIdx = rules.findIndex((r) => r.action === "predefined" && Array.isArray(r.domain_regex) && r.domain_regex.includes("^[^.]+$"));
+    expect(lanIdx).toBe(0);
+    expect(magicIdx).toBeGreaterThan(lanIdx);
+    expect(singleIdx).toBeGreaterThan(magicIdx);
+  });
 
-    // Second update with a brand new random ID for the same server must reuse addedHk.id!
-    p.nodes = r1.nodes;
-    const incoming2 = [
-      newNode({ id: "brand-new-random-id", tag: "HK 01 Renamed", body: JSON.stringify({ type: "trojan", server: "hk1.example.com", server_port: 443, password: "p1" }) }),
-      newNode({ id: "id-jp1", tag: "JP 01", body: JSON.stringify({ type: "trojan", server: "jp1.example.com", server_port: 443, password: "p3" }) }),
+  it("rejects configuring exit_node and advertise_exit_node together on the same Tailnet", () => {
+    const p = blueprintProfile();
+    p.settings.tailnets = [
+      newTailnet({
+        tag: "ts-conflict",
+        exitNode: "office-gw",
+        endpoint: JSON.stringify({
+          state_directory: "ts-conflict",
+          hostname: "router",
+          advertise_exit_node: true,
+        }),
+      }),
     ];
-    const r2 = mergeSubscriptionNodes(p, baseSub, incoming2);
-    expect(r2.total).toBe(2);
-    expect(r2.kept).toBe(1);
-    expect(r2.added).toBe(1);
-    const updatedHk = r2.nodes.find((n) => n.tag === "[A] HK 01 Renamed")!;
-    expect(updatedHk.id).toBe(addedHk.id);
-
-    // Disambiguates reserved tags like "direct" or "dns-in"
-    const subNoPrefix = { ...baseSub, id: "sub-b", renamePrefix: "" };
-    const r3 = mergeSubscriptionNodes(p, subNoPrefix, [
-      newNode({ id: "id-dir", tag: "direct", body: JSON.stringify({ type: "trojan", server: "d.example.com", server_port: 443, password: "p4" }) }),
-    ]);
-    const dirNode = r3.nodes.find((n) => n.subId === "sub-b")!;
-    expect(dirNode.tag).not.toBe("direct");
+    const issues = validateOpenWrt(p, validSettings());
+    expect(issues.some((i) => i.level === "error" && i.section === "tailscale" && i.detail.includes("exit_node") && i.detail.includes("advertise_exit_node"))).toBe(true);
   });
 });
 

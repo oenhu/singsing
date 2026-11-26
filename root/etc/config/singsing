@@ -32,8 +32,3 @@ config tun 'tun'
 	option ipv6 '1'
 	option mtu ''
 	option route_exclude_address ''
-
-config subscription 'subscription'
-	option auto_update '0'
-	option update_interval '86400'
-	option auto_apply '1'

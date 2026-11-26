@@ -11,6 +11,17 @@ if [ ! -s /etc/singsing/sing-box.json ] && [ -s /etc/sing-box/config.json ]; the
 	fi
 fi
 
+# Clean up legacy subscription cron entry if upgrading from an older release
+if [ -f /etc/crontabs/root ] && grep -q '# singsing-sub' /etc/crontabs/root 2>/dev/null; then
+	tmp_cron="$(mktemp /etc/crontabs/.singsing-clean.XXXXXX 2>/dev/null)" || tmp_cron=""
+	if [ -n "$tmp_cron" ]; then
+		grep -v '# singsing-sub' /etc/crontabs/root > "$tmp_cron" 2>/dev/null || : > "$tmp_cron"
+		chmod 600 "$tmp_cron" 2>/dev/null || true
+		mv -f "$tmp_cron" /etc/crontabs/root
+		printf '%s\n' 'root' >> /etc/crontabs/cron.update 2>/dev/null || true
+	fi
+fi
+
 /etc/init.d/singsing enable >/dev/null 2>&1 || true
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/*
 

@@ -64,3 +64,18 @@ r3 建议用于带已知限制的预发布。RC1 验收时曾记录两项待处�
 - **场景一（`enabled=1, auto_start=1` 运行态硬复位）**：在 `sing-box`、`singtun` 与 RAM `dnsmasq` 接管生效时触发硬复位；约 83 秒恢复 SSH 后确认产生新 `boot_id`，`procd` 自动拉起 `sing-box`、`singtun`、`cache.db` 与 `dnsmasq-singsing.conf`，无残留事务文件；5 项持久化配置（UCI、DHCP、防火墙、活动 JSON、规则集清单）SHA-256 全部一致；Debian 客户端 DNS、直连访问及 `tun-in` 规则接管恢复正常，硬复位后再次执行 `apply_config` 通过（无残留锁）。
 - **场景二（`enabled=1, auto_start=0` 且 RAM `dnsmasq` 接管生效时硬复位）**：触发第二次硬复位后确认产生新 `boot_id`，`/tmp` 内存盘 `dnsmasq-singsing.conf` 随断电自动清除、`/etc/config/dhcp` 未被修改、`sing-box` 保持停用；Debian 客户端无需任何人工干预即直接恢复正常 DNS 与直连访问（无 DNS 黑洞）。
 - 验证结束后从本机备份还原路由器配置，5 项基线文件 SHA-256 全部一致，确认 `sing-box` 无残留进程、无 `singtun`、无 `dnsmasq` drop-in。维护者已确认上述硬复位验证足以覆盖断电恢复场景，不再单独要求物理拔电测试。
+
+### 补充验证：0.1.0-r4 真机专项与官方 OpenWrt 24.10.8 / 25.12.6 QEMU 虚拟机（2026-11-26）
+
+#### 1. LibWrt 25.12-SNAPSHOT 真机（`192.168.21.1` + Debian `192.168.21.2`）
+- **r3 → r4 升级与订阅移除验证**：`apk add --allow-untrusted --no-network luci-app-singsing-0.1.0-r4.apk` 升级后，`subscription-updater.uc` 与 `subscriptions.js` 均已移除，测试注入的旧 `# singsing-sub` cron 条目由 `99-singsing` 自动清除，`ubus -v list luci.singsing` 仅保留 20 个核心接口，原有 UCI、Profile、DHCP、防火墙文件 SHA-256 保持一致。
+- **首次应用 `last-good` 与 TUN 就绪**：删除旧 `sing-box.last-good.json` 后经 `ubus call luci.singsing apply_config` 应用 `Non-CN` 候选配置，返回 `ok: true`，`sing-box.last-good.json` 立即生成且与活动 JSON 完全一致，`singtun` 与 `dnsmasq` drop-in 同步就绪。
+- **Clash API 全生命周期与安全边界**：实测 `GET /version`（`sing-box 1.14.4`）、`PATCH /configs`（`Non-CN` ↔ `GFWList` 返回 `204` 并确认生效）、`PUT /proxies/proxy`（返回 `204` 并确认当前出口切换为 `lab-sel`）、`GET /group/lab-sel/delay`（返回 `200` 未阻塞 `rpcd`）、`GET /connections`、`DELETE /connections`（`204`）；越权请求 `GET /proxies/../restart`、`PUT /configs` 与非 `mode` 的 `PATCH /configs` 均被 `rpcd` 拒绝。
+- **并发连通性检测、分片上传与多 Profile**：`connectivity_check` 4 路并发总耗时 2s（国内 `baidu` HTTP 200 / `cn204` HTTP 204 经 `Non-CN` 直连通过）；`ruleset_upload` 2 分片 300KB 二进制上传字节一致并触发 `reloaded: true`，非法 `.json` 被拒绝；多 Profile `save_profile`/`list_profiles`/`get_profile`/`delete_profile` 通过且拒绝删除 `default`。Debian 客户端 `getent hosts www.baidu.com` 经路由器正常解析。还原备份后 4 项基线 SHA-256 一致，无残留进程或接管。
+
+#### 2. 官方 OpenWrt 24.10.8 与 25.12.6 QEMU 虚拟机（`armsr/armv8` + 静态 musl `sing-box 1.14.4`）
+- **OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`, `opkg`)**：
+  - 首轮实测发现 24.10.8 的 `ucode-mod-fs`（`2025.07.18`）不导出 `mkdtemp`，导致 `rpcd` 启动加载 `singsing.uc` 失败；已将 `singsing.uc` 改为 `mktemp -d` 并重编 `0.1.0-r4` 包。
+  - 修复后在全新 24.10.8 VM 实测：`opkg update && opkg install luci-app-singsing_0.1.0-r4_all.ipk` 自动从官方源安装 `kmod-tun`、`kmod-nft-tproxy`、`kmod-nft-queue`、`curl` 等全部依赖；安装后 `luci.singsing` 无需手动重启 `rpcd` 即注册就绪；`apply_config`、`singtun`、nftables `table inet sing-box`、`/tmp/dnsmasq.cfg01411c.d/dnsmasq-singsing.conf`、`sing-box.last-good.json`、Clash API（`204` 与路径拦截）、分片上传、多 Profile 与 `opkg remove` 清理（停服、撤 TUN、还原 dnsmasq、保留配置）全部通过。
+- **OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`, `apk`)**：
+  - 全新 25.12.6 VM 实测：`apk update && apk add --allow-untrusted luci-app-singsing-0.1.0-r4.apk` 自动安装 9 个依赖包（含 `kmod-nft-queue`、`kmod-nft-tproxy`、`kmod-tun`、`curl`）；`rpcd` 注册、`apply_config`、`singtun`、nftables `table inet sing-box`、`dnsmasq` drop-in、`last-good`、Clash API（`204` 与安全拦截）、分片上传、多 Profile 与 `apk del` 清理全部通过。

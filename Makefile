@@ -6,7 +6,7 @@ LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-singsing
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_LICENSE:=MIT
 
 define Package/$(PKG_NAME)/conffiles
@@ -19,7 +19,6 @@ define Package/$(PKG_NAME)/prerm
 if [ -z "$${IPKG_INSTROOT}" ]; then
 	/etc/init.d/singsing stop >/dev/null 2>&1 || true
 	/usr/share/singsing/service-manager.sh dnsmasq_restore >/dev/null 2>&1 || true
-	/usr/share/singsing/service-manager.sh cron_remove >/dev/null 2>&1 || true
 	/etc/init.d/singsing disable >/dev/null 2>&1 || true
 	rm -rf /tmp/singsing /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null || true
 fi

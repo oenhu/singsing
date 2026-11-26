@@ -34,14 +34,6 @@
 			"path": "singsing/nodes"
 		}
 	},
-	"admin/services/singsing/subscriptions": {
-		"title": "订阅管理",
-		"order": 32,
-		"action": {
-			"type": "view",
-			"path": "singsing/subscriptions"
-		}
-	},
 	"admin/services/singsing/groups": {
 		"title": "代理组管理",
 		"order": 35,

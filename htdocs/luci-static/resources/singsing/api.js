@@ -144,39 +144,6 @@ var callClashApi = rpc.declare({
 	expect: {}
 });
 
-var callGetSubscriptions = rpc.declare({
-	object: 'luci.singsing',
-	method: 'get_subscriptions',
-	expect: {}
-});
-
-var callSaveSubscriptions = rpc.declare({
-	object: 'luci.singsing',
-	method: 'save_subscriptions',
-	params: ['subscriptions'],
-	expect: {}
-});
-
-var callFetchSubscription = rpc.declare({
-	object: 'luci.singsing',
-	method: 'fetch_subscription',
-	params: ['url', 'user_agent'],
-	expect: {}
-});
-
-var callSyncCron = rpc.declare({
-	object: 'luci.singsing',
-	method: 'sync_cron',
-	expect: {}
-});
-
-var callRunSubUpdater = rpc.declare({
-	object: 'luci.singsing',
-	method: 'run_subscription_updater',
-	params: ['id'],
-	expect: {}
-});
-
 var enginePromise = null;
 
 function loadEngine() {
@@ -292,12 +259,15 @@ function buildCurrentConfig() {
 		loadActiveProfile(),
 		callStatus(),
 		callGetRulesetUrls().catch(function() { return { urls: {} }; }),
-		callGetAccessControl().catch(function() { return { access_control: { mode: 'all', clients: [], deviceRules: [] } }; })
+		callGetAccessControl()
 	]).then(function(res) {
 		var loaded = res[0];
 		var st = res[1] || {};
 		var urlOverrides = (res[2] && res[2].urls) || {};
-		var accessControl = (res[3] && res[3].access_control) || { mode: 'all', clients: [], deviceRules: [] };
+		var acRes = res[3];
+		if (!acRes || (acRes.ok !== undefined && acRes.ok !== true) || !acRes.access_control || typeof acRes.access_control !== 'object')
+			throw new Error('读取客户端访问控制配置失败：' + ((acRes && acRes.error) || 'RPC 未返回有效结果'));
+		var accessControl = acRes.access_control;
 		return readOpenWrtSettings(st.lan_ips || []).then(function(settings) {
 			settings.paths.ruleSetUrlOverrides = urlOverrides;
 			settings.accessControl = accessControl;
@@ -480,11 +450,6 @@ return baseclass.extend({
 	clashGetConnections: clashGetConnections,
 	clashCloseConnection: clashCloseConnection,
 	clashCloseAllConnections: clashCloseAllConnections,
-	getSubscriptions: callGetSubscriptions,
-	saveSubscriptions: callSaveSubscriptions,
-	fetchSubscription: callFetchSubscription,
-	syncCron: callSyncCron,
-	runSubUpdater: callRunSubUpdater,
 	loadEngine: loadEngine,
 	readOpenWrtSettings: readOpenWrtSettings,
 	loadActiveProfile: loadActiveProfile,

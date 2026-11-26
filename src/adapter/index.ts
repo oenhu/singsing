@@ -7,8 +7,6 @@ export { adaptTun } from "./tun";
 export { adaptRuleSets } from "./rulesets";
 export { adaptAccessControl, parseClientEntries, isValidMac, normalizeMac } from "./access";
 export { generateOpenWrtConfig } from "./config";
-export { mergeSubscriptionNodes, nodeFingerprint } from "./subscriptions";
-export type { SubscriptionItem, ManagedProxyNode } from "./subscriptions";
 
 // Re-export upstream core capabilities for LuCI views (without React/DOM dependencies).
 export {

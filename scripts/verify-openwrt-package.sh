@@ -74,7 +74,7 @@ sh -n "$install_hook"
 sh -n "$remove_hook"
 grep -Fq '/etc/init.d/rpcd reload' "$install_hook"
 for cleanup in '/etc/init.d/singsing stop' 'service-manager.sh dnsmasq_restore' \
-	'service-manager.sh cron_remove' '/etc/init.d/singsing disable'; do
+	'/etc/init.d/singsing disable'; do
 	grep -Fq "$cleanup" "$remove_hook"
 done
 

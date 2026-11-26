@@ -11,7 +11,6 @@
 					"dns_check",
 					"ruleset_status",
 					"get_ruleset_urls",
-					"get_subscriptions",
 					"get_access_control",
 					"get_lan_clients",
 					"connectivity_check",
@@ -33,11 +32,7 @@
 					"ruleset_update",
 					"ruleset_upload",
 					"save_ruleset_urls",
-					"save_subscriptions",
 					"save_access_control",
-					"fetch_subscription",
-					"sync_cron",
-					"run_subscription_updater",
 					"clash_api"
 				]
 			}

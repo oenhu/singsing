@@ -88,18 +88,40 @@ describe("service-manager application transaction (OpenWrt commands mocked)", ()
     expect(read(f.running)).toBe("5335");
   });
 
-  it("atomically replaces the active config inode, backs up last-good, publishes manifest, and updates dnsmasq drop-in on success", () => {
+  it("atomically replaces the active config inode, records verified last-good, publishes manifest, and updates dnsmasq drop-in on success", () => {
     startPrevious();
     const beforeIno = statSync(f.config).ino;
     const result = f.apply({ MOCK_NEW_PORT: "5336" });
     expect(result.status, result.stderr).toBe(0);
     expect(statSync(f.config).ino).not.toBe(beforeIno);
     expect(read(f.config)).toBe(candidate);
-    expect(read(f.lastGood)).toBe(previous);
+    expect(read(f.lastGood)).toBe(candidate);
     expect(read(f.manifest)).toBe('[{"tag":"candidate"}]');
     expect(read(f.running)).toBe("5336");
     expect(read(f.dropIn)).toContain("server=127.0.0.1#5336");
     expect(read(f.events)).toBe("check\nstart-candidate\n");
+  });
+
+  it("creates last-good on the first successful apply", () => {
+    unlinkSync(f.config);
+    unlinkSync(f.lastGood);
+    const result = f.apply({ MOCK_NEW_PORT: "5336" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(read(f.config)).toBe(candidate);
+    expect(read(f.lastGood)).toBe(candidate);
+  });
+
+  it("rolls back when a TUN-enabled candidate never brings up its TUN interface", () => {
+    startPrevious();
+    const tunCandidate = '{"marker":"candidate","inbounds":[{"type":"tun","tag":"tun-in","interface_name":"singtun"},{"tag":"dns-in","listen":"127.0.0.1","listen_port":5336}]}';
+    writeFileSync(f.candidate, tunCandidate);
+    const result = f.apply({ MOCK_FAIL_TUN: "1", MOCK_NEW_PORT: "5336" });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(/TUN/i);
+    expect(read(f.config)).toBe(previous);
+    expect(read(f.lastGood)).toBe(previous);
+    expect(read(f.running)).toBe("5335");
+    expect(read(f.dropIn)).toBe(previousDropIn);
   });
 
   it("removes the failed active config and restores dnsmasq when first-time apply fails startup", () => {
@@ -108,6 +130,7 @@ describe("service-manager application transaction (OpenWrt commands mocked)", ()
     const result = f.apply({ MOCK_FAIL_START: "1", MOCK_NEW_PORT: "5336" });
     expect(result.status).toBe(1);
     expect(existsSync(f.config)).toBe(false);
+    expect(existsSync(f.lastGood)).toBe(false);
     expect(existsSync(f.running)).toBe(false);
     expect(existsSync(f.dropIn)).toBe(false);
     expect(read(f.manifest)).toBe(activeManifest);

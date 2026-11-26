@@ -214,6 +214,25 @@ get_config_dns_field() {
 	'
 }
 
+get_config_tun_iface() {
+	CONFIG_FILE="$SB_CONFIG" ucode -e '
+		import { readfile } from "fs";
+		let config = json(readfile(getenv("CONFIG_FILE")) || "{}");
+		for (let inbound in (config?.inbounds || [])) {
+			if (inbound?.type != "tun") continue;
+			let name = inbound?.interface_name || "";
+			if (name != "") { print(name); exit(0); }
+		}
+		exit(0);
+	' 2>/dev/null || true
+}
+
+is_tun_ready() {
+	local iface="$1"
+	[ -z "$iface" ] && return 0
+	[ -e "/sys/class/net/$iface" ]
+}
+
 reload_dnsmasq() {
 	if ! /etc/init.d/dnsmasq restart >/dev/null 2>&1 && ! /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
 		printf 'dnsmasq restart and reload both failed\n' >&2
@@ -537,8 +556,9 @@ reload_if_running() {
 }
 
 wait_dns_ready() {
-	local port timeout i pid has_sock_tool=0
+	local port tun_iface timeout i pid has_sock_tool=0
 	port="$(get_config_dns_field listen_port)" || return 1
+	tun_iface="$(get_config_tun_iface)"
 	timeout="${1:-10}"
 	if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
 		has_sock_tool=1
@@ -548,12 +568,14 @@ wait_dns_ready() {
 		pid="$(get_service_pid)"
 		if [ -n "$pid" ]; then
 			if [ "$has_sock_tool" -eq 1 ]; then
-				if is_port_listening "$port"; then
+				if is_port_listening "$port" && is_tun_ready "$tun_iface"; then
 					return 0
 				fi
 			else
-				# Fallback: process stayed alive >= 2 seconds
-				[ "$i" -ge 2 ] && return 0
+				# Fallback: process stayed alive >= 2 seconds and TUN ready
+				if [ "$i" -ge 2 ] && is_tun_ready "$tun_iface"; then
+					return 0
+				fi
 			fi
 		fi
 		sleep 1
@@ -582,9 +604,9 @@ apply_config() {
 			exit 1
 		}
 
-		local staged_config="" staged_manifest="" staged_backup="" previous_dns="" dns_conf=""
+		local staged_config="" staged_manifest="" previous_config="" staged_last_good="" previous_dns="" dns_conf=""
 		local had_config=0 was_running=0 failed_step
-		trap 'rm -f "$TX_FILE" "$staged_config" "$staged_manifest" "$staged_backup" "$previous_dns"' EXIT
+		trap 'rm -f "$TX_FILE" "$staged_config" "$staged_manifest" "$previous_config" "$staged_last_good" "$previous_dns"' EXIT
 		trap 'exit 1' INT TERM
 
 		local enabled_flag local_dns auto_rollback err_out
@@ -635,7 +657,7 @@ apply_config() {
 				cp "$candidate_manifest" "$staged_manifest" || exit 1
 		fi
 
-		# Save the current config and DNS handoff before changing either.
+		# Save the current config and DNS handoff in transaction-local temps before changing either.
 		if [ -n "$(get_service_pid)" ]; then
 			was_running=1
 			dns_conf="$(get_dnsmasq_conf_file)"
@@ -645,27 +667,33 @@ apply_config() {
 			fi
 		fi
 		if [ -s "$SB_CONFIG" ]; then
-			staged_backup="$(mktemp "$CONF_DIR/.last-good.XXXXXX")" &&
-				cp "$SB_CONFIG" "$staged_backup" &&
-				mv -f "$staged_backup" "$SB_LAST_GOOD" || exit 1
+			previous_config="$(mktemp "$CONF_DIR/.prev.XXXXXX")" &&
+				cp "$SB_CONFIG" "$previous_config" || exit 1
 			had_config=1
 		fi
 
 		# 4. Atomically install new config and ensure stock sing-box init does not collide
 		mv -f "$staged_config" "$SB_CONFIG" || exit 1
+		staged_config=""
 		[ "$candidate" != "$TMP_NEW_CONFIG" ] || rm -f "$TMP_NEW_CONFIG"
 		disable_stock_singbox >/dev/null 2>&1 || true
 
-		# 5. Restart and publish the matching manifest after the health check.
+		# 5. Restart, verify DNS + TUN readiness, take over dnsmasq, publish manifest, and record last-good.
 		if ! SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart; then
 			failed_step='sing-box restart failed'
 		elif ! wait_dns_ready 10; then
-			failed_step='sing-box DNS listener did not become ready'
+			failed_step='sing-box DNS or TUN did not become ready'
 		elif ! dnsmasq_takeover; then
 			failed_step='dnsmasq takeover failed'
 		elif [ -n "$staged_manifest" ] && ! mv -f "$staged_manifest" "$MANIFEST_FILE"; then
 			failed_step='Could not publish the rule-set manifest'
 		else
+			staged_manifest=""
+			staged_last_good="$(mktemp "$CONF_DIR/.last-good.XXXXXX")" &&
+				cp "$SB_CONFIG" "$staged_last_good" &&
+				mv -f "$staged_last_good" "$SB_LAST_GOOD" &&
+				staged_last_good="" ||
+				logger -t singsing -p daemon.warn "Applied config succeeded, but failed to update $SB_LAST_GOOD"
 			exit 0
 		fi
 		printf '%s\n' "$failed_step" >&2
@@ -673,16 +701,20 @@ apply_config() {
 		# Always restore files. The setting controls whether to restart the old service.
 		auto_rollback="$(uci_get "main.auto_rollback" "1")"
 		if [ "$had_config" -eq 1 ]; then
-			if ! cp "$SB_LAST_GOOD" "$staged_config" || ! mv -f "$staged_config" "$SB_CONFIG"; then
+			staged_config="$(mktemp "$CONF_DIR/.restore.XXXXXX")" || staged_config=""
+			if [ -z "$staged_config" ] || ! cp "$previous_config" "$staged_config" || ! mv -f "$staged_config" "$SB_CONFIG"; then
 				printf 'Could not restore active config; the last good copy is at %s\n' "$SB_LAST_GOOD" >&2
 				had_config=0
 			elif [ "$auto_rollback" = "1" ] && [ "$was_running" -eq 1 ]; then
+				staged_config=""
 				if SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart &&
 					wait_dns_ready 8 && restore_dnsmasq_handoff "$previous_dns" "$dns_conf"; then
-					printf 'Rolled back to last good config and restored the previous service\n' >&2
+					printf 'Rolled back to previous config and restored the previous service\n' >&2
 					exit 2
 				fi
 				printf 'Could not restore the previous running service\n' >&2
+			else
+				staged_config=""
 			fi
 		fi
 
@@ -693,93 +725,6 @@ apply_config() {
 		[ "$had_config" -ne 0 ] || rm -f "$SB_CONFIG" || printf 'Could not remove the failed active config\n' >&2
 		exit 1
 	) 9>"$LOCK_FILE"
-}
-
-notify_cron() {
-	# Safe BusyBox crond reload: never restart crond if already running (safe inside cron jobs).
-	# If crond is not running yet (e.g. fresh OpenWrt install where /etc/crontabs was empty), start it.
-	local cron_running=0
-	if command -v ubus >/dev/null 2>&1 && command -v ucode >/dev/null 2>&1; then
-		cron_running="$(ubus call service list '{"name":"cron"}' 2>/dev/null | ucode -e '
-			import { stdin } from "fs";
-			let d = json(stdin.read("all") || "{}");
-			let insts = d?.cron?.instances;
-			if (type(insts) == "object") {
-				for (let k, v in insts) if (v && v.running) { print(1); exit(0); }
-			}
-			print(0);
-		' 2>/dev/null || printf '0')"
-	fi
-	if [ "$cron_running" = "1" ]; then
-		printf '%s\n' 'root' >> /etc/crontabs/cron.update
-	else
-		/etc/init.d/cron start >/dev/null 2>&1 || true
-	fi
-}
-
-cron_remove() {
-	local crontab="/etc/crontabs/root"
-	local cron_lock="/var/lock/root-crontab"
-	local tmp="" changed=0
-	[ -f "$crontab" ] || return 0
-
-	mkdir -p "$(dirname "$cron_lock")"
-	(
-		lock "$cron_lock" || exit 1
-		trap '[ -n "${tmp:-}" ] && rm -f "$tmp"; lock -u "$cron_lock" 2>/dev/null || true' EXIT INT TERM
-		tmp="$(mktemp /etc/crontabs/.singbox-cron.XXXXXX)" || exit 1
-		grep -v "# singsing-sub" "$crontab" > "$tmp" 2>/dev/null || : > "$tmp"
-		chmod 600 "$tmp" 2>/dev/null || true
-		if ! cmp -s "$tmp" "$crontab"; then
-			mv -f "$tmp" "$crontab"
-			tmp=""
-			changed=1
-		fi
-		[ "$changed" -eq 0 ] || notify_cron
-	)
-}
-
-cron_sync() {
-	local auto_update interval crontab cron_lock expr tmp="" changed=0
-	auto_update="$(uci_get "subscription.auto_update" "0")"
-	interval="$(uci_get "subscription.update_interval" "86400")"
-	crontab="/etc/crontabs/root"
-	cron_lock="/var/lock/root-crontab"
-
-	mkdir -p /etc/crontabs "$(dirname "$cron_lock")"
-	(
-		lock "$cron_lock" || exit 1
-		trap '[ -n "${tmp:-}" ] && rm -f "$tmp"; lock -u "$cron_lock" 2>/dev/null || true' EXIT INT TERM
-		tmp="$(mktemp /etc/crontabs/.singbox-cron.XXXXXX)" || exit 1
-
-		if [ -f "$crontab" ]; then
-			grep -v "# singsing-sub" "$crontab" > "$tmp" 2>/dev/null || : > "$tmp"
-		else
-			: > "$tmp"
-		fi
-
-		if [ "$auto_update" = "1" ]; then
-			case "$interval" in
-				21600)  expr="15 */6 * * *" ;;
-				43200)  expr="15 */12 * * *" ;;
-				259200) expr="30 3 */3 * *" ;;
-				604800) expr="30 3 * * 1" ;;
-				*)      expr="30 3 * * *" ;;
-			esac
-			printf '%s /usr/share/singsing/subscription-updater.uc >/dev/null 2>&1 # singsing-sub\n' "$expr" >> "$tmp"
-		fi
-
-		chmod 600 "$tmp" 2>/dev/null || true
-		if [ -f "$crontab" ] && cmp -s "$tmp" "$crontab"; then
-			rm -f "$tmp"
-			tmp=""
-		else
-			mv -f "$tmp" "$crontab"
-			tmp=""
-			changed=1
-		fi
-		[ "$changed" -eq 0 ] || notify_cron
-	)
 }
 
 case "${1:-}" in
@@ -795,10 +740,8 @@ case "${1:-}" in
 	wait_dns_ready)         wait_dns_ready "${2:-10}" ;;
 	wait_service_stopped)   wait_service_stopped ;;
 	apply_config)           apply_config "${2:-}" "${3:-}" ;;
-	cron_sync)              cron_sync ;;
-	cron_remove)            cron_remove ;;
 	*)
-		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|reload_if_running|validate_config|wait_dns_ready|apply_config|cron_sync|cron_remove}\n' "$0" >&2
+		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|reload_if_running|validate_config|wait_dns_ready|apply_config}\n' "$0" >&2
 		exit 1
 		;;
 esac

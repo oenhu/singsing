@@ -193,12 +193,14 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
 
   if (settings.accessControl) {
     const ac = settings.accessControl;
-    const listCheck = parseClientEntries(ac.clients || []);
-    if (listCheck.invalid.length > 0) {
-      err(`访问控制设备列表格式无效（支持 IPv4/IPv6/CIDR/MAC）：${listCheck.invalid.join("、")}`);
-    }
-    if (ac.mode === "allowlist" && listCheck.cidrs.length === 0 && listCheck.macs.length === 0) {
-      warn("访问控制处于「仅指定设备代理」模式但列表为空，所有局域网设备将直连");
+    if (ac.mode !== "all") {
+      const listCheck = parseClientEntries(ac.clients || []);
+      if (listCheck.invalid.length > 0) {
+        err(`访问控制设备列表格式无效（支持 IPv4/IPv6/CIDR/MAC）：${listCheck.invalid.join("、")}`);
+      }
+      if (ac.mode === "allowlist" && listCheck.cidrs.length === 0 && listCheck.macs.length === 0) {
+        warn("访问控制处于「仅指定设备代理」模式但列表为空，所有局域网设备将直连");
+      }
     }
     for (const dr of ac.deviceRules || []) {
       const dc = parseClientEntries(dr.clients || []);
@@ -257,6 +259,15 @@ export function validateOpenWrt(profile: Profile, settings: OpenWrtSettings): Is
   for (const t of profile.settings.tailnets) {
     const { endpoint } = tailnetEndpoint(t);
     if (!endpoint) continue;
+    if (endpoint.exit_node && endpoint.advertise_exit_node === true) {
+      issues.push({
+        level: "error",
+        section: "tailscale",
+        id: t.id,
+        detail: "不能同时设置使用出口节点（exit_node）和通告本机为出口节点（advertise_exit_node）",
+        message: `Tailscale「${t.tag}」：不能同时设置使用出口节点（exit_node）和通告本机为出口节点（advertise_exit_node）`,
+      });
+    }
     const rawDir = typeof endpoint.state_directory === "string" ? endpoint.state_directory.trim() : "tailscale";
     if (rawDir.split("/").includes("..")) {
       issues.push({

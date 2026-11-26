@@ -214,6 +214,10 @@ return view.extend({
 								errDiv.textContent = '状态目录名不能包含上级目录 ..';
 								return;
 							}
+							if (advertiseExitChk.checked && exitNodeInput.value.trim()) {
+								errDiv.textContent = '不能同时设置使用出口节点（exit_node）和本机作为出口节点通告（advertise_exit_node）';
+								return;
+							}
 							var advRoutes = parseLinesOrCsv(advRoutesInput.value);
 							var badAdv = advRoutes.filter(function(r) {
 								return !engine.isValidCidr(r, 4) && !engine.isValidCidr(r, 6);

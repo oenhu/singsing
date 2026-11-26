@@ -13,27 +13,27 @@
 - **原生透明代理与客户端访问控制**：使用 sing-box 原生 Linux TUN + `auto_redirect` + `dns_mode: hijack`，基于原生 `source_ip_cidr` / `source_mac_address` 实现局域网设备白名单/黑名单及指定出口分流（支持读取在线 DHCP/ARP 设备一键选取）。
 - **全图形化 Tailscale / Headscale**：支持多 Tailnet、自定义控制服务器（`control_url`）、`auth_key`、MagicDNS、子网路由与出口节点，无需手写 JSON。
 - **Clash API 实时控制与连接管理**：后端 `rpcd` 安全代理本机 `127.0.0.1:9090`（密钥不暴露给前端），支持分流模式/代理组热切换、节点测速、保存为默认、分流连通性一键检测及实时连接管理。
-- **零外部依赖多订阅与定时更新**：纯 OpenWrt 原生 `ucode` + `cron`（安全 `cron.update` 重载），无需 Node.js / QuickJS / Python / Lua，支持关键词/正则过滤、重命名、去重、稳定节点 ID 保持与失败保护。
-- **安全事务与自动回滚**：独立运行配置路径 `/etc/singsing/sing-box.json`（自动停用系统冲突的 `/etc/init.d/sing-box`），应用前强制 `sing-box check`，支持自定义核心路径与 `no_new_privs` 加固，启动失败自动回滚并还原 `dnsmasq`。
+- **静态节点多格式导入**：节点管理页直接复用上游 `singbox-confgen` 解析器，支持粘贴导入 sing-box JSON / Clash / Mihomo YAML / Base64 / SIP008 / 分享链接，不内置后台订阅定时拉取或第二套配置生成引擎。
+- **安全事务与自动回滚**：独立运行配置路径 `/etc/singsing/sing-box.json`（自动停用系统冲突的 `/etc/init.d/sing-box`），应用前强制 `sing-box check`，支持自定义核心路径与 `no_new_privs` 加固，启动检查同时覆盖进程、DNS 监听与 TUN 接口就绪，成功后原子刷新 `sing-box.last-good.json`，失败自动回滚并还原 `dnsmasq`。
 
-## RC1 安装、升级和卸载
+## 安装、升级和卸载（0.1.0-r4）
 
 ### 环境与安装包
 
 | 环境 | 安装包 | 验证范围 |
 | --- | --- | --- |
-| OpenWrt 24.10.8 | `luci-app-singsing_0.1.0-r3_all.ipk` | 正式 SDK 构建与包检查通过，官方固件运行尚未验证 |
-| OpenWrt 25.12.6 | `luci-app-singsing-0.1.0-r3.apk` | 正式 SDK 构建与包检查通过，官方固件运行尚未验证 |
-| LibWrt 25.12-SNAPSHOT | 同一 r3 APK | 现有真机验证，核心为 sing-box 1.14.4 |
+| OpenWrt 24.10.8 | `luci-app-singsing_0.1.0-r4_all.ipk` | 正式 SDK 构建、包检查与官方 24.10.8 `armsr/armv8` QEMU VM 安装/运行/卸载全链路通过 |
+| OpenWrt 25.12.6 | `luci-app-singsing-0.1.0-r4.apk` | 正式 SDK 构建、包检查与官方 25.12.6 `armsr/armv8` QEMU VM 安装/运行/卸载全链路通过 |
+| LibWrt 25.12-SNAPSHOT | 同一 r4 APK | 真机升级（r3 → r4）与运行验证通过，核心为 sing-box 1.14.4 |
 
-在路由器上先执行 `sing-box version`。RC1 的验证核心为 **1.14.4**，默认路径是 `/usr/bin/sing-box`。选择对应固件的安装包，并对照 Release 的 `SHA256SUMS` 检查文件。
+在路由器上先执行 `sing-box version`。当前验证核心为 **1.14.4**，默认路径是 `/usr/bin/sing-box`。选择对应固件的安装包，并对照 Release 的 `SHA256SUMS` 检查文件。
 
 ```sh
 # OpenWrt 24.10
-opkg install ./luci-app-singsing_0.1.0-r3_all.ipk
+opkg install ./luci-app-singsing_0.1.0-r4_all.ipk
 
 # OpenWrt 25.12 / 本次验证的 LibWrt Snapshot
-apk add --allow-untrusted ./luci-app-singsing-0.1.0-r3.apk
+apk add --allow-untrusted ./luci-app-singsing-0.1.0-r4.apk
 ```
 
 依赖包来自设备固件对应的软件源。安装后进入 **服务 → Sing-Box**，填写直连上游 DNS IP，保存节点及分流。先在运行概览预览配置，再启用服务并应用。成功后在运行概览确认 TUN 状态，在运行日志确认 DNS 转发。
@@ -82,32 +82,32 @@ mv -f "$temp" /etc/singsing/sing-box.json
 
 审计基线为 GitHub `main` 的 `242d10a`。实现、自动化校验和真机运行分别记录。部署与升级证据见 [RC1 真机验收](docs/rc1-validation.md)。
 
-| 模块 | 当前职责与证据 | 规划差距 |
+| 模块 | 当前职责与证据 | 状态与后续事项 |
 | --- | --- | --- |
-| 配置生成 | [upstream](src/upstream) 管理 Profile、节点、代理组、DNS、路由和原生 Tailscale Endpoint。常规 LuCI 生成通过 [adapter](src/adapter/config.ts) 调用上游。 | 定时订阅另有局部配置生成路径，见下文。 |
-| OpenWrt 适配 | [adapter](src/adapter) 调整 TUN、dnsmasq 对接用 DNS 入站、设备规则、本地规则集、缓存及状态目录。RC1 与阶段二已验证原生 TUN、Auto Redirect、DNS、IPv4/IPv6 与设备分流。 | 待决的设备策略边界和配置生成收敛待维护者确认。 |
-| LuCI 与 RPC | [LuCI API](htdocs/luci-static/resources/singsing/api.js) 让预览、核心校验和应用共用生成入口；[RPC](root/usr/share/rpcd/ucode/singsing.uc) 读取设置、保存 Profile、接受候选 JSON。Profile 和运行 JSON 分开存放。 | 不同操作各自读取当前设置。编辑配置后重新应用会重新生成候选；当前没有部署某次预览快照的约定。 |
-| 服务管理 | [procd 脚本](root/etc/init.d/singsing) 和 [Service Manager](root/usr/share/singsing/service-manager.sh) 管理规则集、真实核心校验、原子替换、启停、DNS 接管及恢复。RC1 在 LibWrt Snapshot 上验证重启、自启、候选拒绝和启动失败回滚；单测补充原子替换与首次启动失败清理。 | 目前先备份被替换的配置，按进程与 DNS 监听判断就绪。规划的“启动成功后记录新配置为最后有效版本”和单独 TUN 就绪检查仍需界定。 |
-| 设备分流 | [access.ts](src/adapter/access.ts) 生成原生 `source_ip_cidr`、`source_mac_address`。阶段二已补齐 LuCI 保存与重读、IPv4/IPv6/MAC、重叠规则顺序、1.14.4 核心校验与真实客户端匹配证据。 | 随机 MAC 说明已记入文档；设备策略读取失败回落与 `all` 模式旧列表边界已用隔离单测记录，是否调整待维护者确认。 |
-| Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已有多 Tailnet、官方与 Headscale 控制服务器、Auth Key、MagicDNS、接收与通告子网、使用与通告出口，导入的高级原生字段可保留。阶段三已完成 LuCI 表单/冲突/引用测试、1.14.4 导出 Schema、真实 `sing-box 1.14.4` 离线校验，并在专用 Headscale 环境完成真机联调（注册、无 `auth_key` 重启复用、MagicDNS FQDN、对端与通告子网互通、Exit Node 使用与通告批准、按 tag 选流及日志无凭据泄露）。 | 1) 同一端点同时填 `exit_node` 与 `advertise_exit_node` 会被 1.14.4 核心拒绝（表单未前置拦截，应用前由 `sing-box check` 拒绝）；2) 单标签 MagicDNS 主机名当前会被 OpenWrt 适配层 `^[^.]+$` 的 `NXDOMAIN` 规则先于 `preferred_by` 拦截（FQDN 正常解析）；3) 官方 Tailscale 控制面与 1.15 新字段待后续确认/升级。 |
-| 发布 | 两个正式 SDK 的 r3 包构建与校验已通过，LibWrt Snapshot 有硬件结果；阶段一至阶段四未修改任何打包运行文件，r3 包内容与 `242d10a` 一致。 | 卸载后 rpcd 注册残留、规则集下载失败诊断含完整 URL 均已按维护者决定标为「不处理」（保留既有证据与手动重载办法）。OpenWrt 24.10.8 和 25.12.6 官方固件运行仍未验证。 |
+| 配置生成 | [upstream](src/upstream) 管理 Profile、节点、代理组、DNS、路由和原生 Tailscale Endpoint；全部配置生成统一经 [adapter](src/adapter/config.ts) 调用上游。 | 已移除重复的后台订阅解析/生成代码（`subscription-updater.uc`）；后续随上游同步关注 `src/upstream/generate.ts` 本地改动。 |
+| OpenWrt 适配 | [adapter](src/adapter) 调整 TUN、dnsmasq 对接用 DNS 入站、设备规则、本地规则集、缓存及状态目录。已覆盖 4 种分流模式与双栈校验。 | 已收敛访问控制边界与单标签 MagicDNS 规则顺序。 |
+| LuCI 与 RPC | [LuCI API](htdocs/luci-static/resources/singsing/api.js) 让预览、核心校验和应用共用生成入口；[RPC](root/usr/share/rpcd/ucode/singsing.uc) 读取设置、保存 Profile、接受候选 JSON 并代理本机 Clash API。 | 已修复 OpenWrt 24.10.8 `ucode-mod-fs` 无 `mkdtemp` 导致的 RPC 加载失败；读取访问控制失败时显式报错不静默降级。 |
+| 服务管理 | [procd 脚本](root/etc/init.d/singsing) 和 [Service Manager](root/usr/share/singsing/service-manager.sh) 管理规则集、真实核心校验、原子替换、启停、DNS 接管及恢复。 | 已在就绪检查中纳入 TUN 接口检测，并在应用成功后原子刷新 `sing-box.last-good.json`（含首次成功应用）。 |
+| 设备分流 | [access.ts](src/adapter/access.ts) 生成原生 `source_ip_cidr`、`source_mac_address`，已通过 LuCI、1.14.4 核心及真机客户端匹配验证。 | `all` 模式下保存与应用一致忽略未使用的旧设备列表；`get_access_control` 失败显式阻断生成。 |
+| Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已支持多 Tailnet、官方与 Headscale、MagicDNS、子网路由与出口节点，并完成专用 Headscale 真机闭环联调。 | 1) 已在表单与 `validation.ts` 前置禁止同一端点同时配置 `exit_node` 与 `advertise_exit_node`；2) 已调整 DNS 规则顺序为 `.lan` 保护 → Tailscale MagicDNS `preferred_by` → 单标签 `^[^.]+$` `NXDOMAIN`；3) 官方 Tailscale 控制面按维护者决定不再单独考虑，后续仅随上游关注 1.15 新字段。 |
+| 发布 | r4 `.ipk`（24.10.8 SDK）与 `.apk`（25.12.6 SDK）已通过构建、静态包检查、官方 24.10.8 / 25.12.6 QEMU VM 实机运行及 LibWrt 真机升级运行验证，保留 `+kmod-nft-queue` 依赖。 | 卸载后 rpcd 注册残留、规则集下载失败诊断含完整 URL 均已按维护者决定标为「不处理」。 |
 
-### 需要确认的现有行为
+### 已收敛的设计边界（r4）
 
-- **设备规则优先级与边界。** 同一配置的生成结果显示，DNS 及内置保护、适用的直连列表和有序自定义规则可在设备规则之前命中。设备指定出口按保存顺序排列，并先于白名单或黑名单规则；设备规则整体早于默认分流模式。若让设备策略覆盖普通自定义规则，命中两者的用户流量会改道。现有“所有设备按分流策略”模式也能保存旧的无效设备列表，生成时仍报错；读取设备策略失败时，生成入口回落到 `all`。两项边界已用隔离单测记录，保持现状直至维护者确认。
-- **Tailscale 出口节点互斥与单标签 MagicDNS 行为。** 真实 `sing-box 1.14.4` 拒绝同一 Tailscale 端点同时设置 `exit_node` 与 `advertise_exit_node: true`（即使 Schema 允许）；目前应用前由 `sing-box check` 拦截，图形表单暂未前置阻止。此外，在真实 Headscale 联调中确认 FQDN MagicDNS（`<host>.<magicdns-domain>`）可正常经 `tailscale` DNS 解析，而无后缀单标签主机名会优先命中 `src/adapter/dns.ts` 前置的 `^[^.]+$` `NXDOMAIN` 规则。两项是否调整待维护者确认。
-- **订阅配置生成。** LuCI 订阅导入使用上游引擎。[定时订阅程序](root/usr/share/singsing/subscription-updater.uc) 自行解析部分订阅格式，并在 `patchRunningConfig` 重建节点与代理组片段，然后把候选交给 Service Manager。这是目前最明确的重复生成代码。应先对照两条路径的输出与升级行为。移除局部生成必须先解决后台自动应用的兼容性。
-- **运行备份的语义。** 现有 `last-good` 在下一次应用开始时保存当时的活动文件。要改为始终保存最近健康的配置，需要明确首次应用成功、关闭自动回滚和活动文件已损坏时的预期行为。
+- **移除订阅管理，专注平台适配**：已删除 `subscription-updater.uc`、`subscriptions.js`、`src/adapter/subscriptions.ts` 及 cron 定时同步，升级脚本 `99-singsing` 会自动清理旧版本遗留的 `# singsing-sub` cron 条目；用户直接在「节点管理」页面复用上游多格式导入器导入静态节点。
+- **Tailscale 出口节点互斥与单标签 MagicDNS**：表单与适配层校验均前置拒绝同时设置 `exit_node` 和 `advertise_exit_node: true`；DNS 规则顺序调整为 `.lan`/`.home.arpa` `NXDOMAIN` → Tailscale `preferred_by` → 单标签 `^[^.]+$` `NXDOMAIN`，既放行单标签 MagicDNS 主机名又不泄漏普通局域网主机名。
+- **访问控制边界收敛**：`buildCurrentConfig()` 在 `get_access_control` RPC 失败时直接报错中止，不再静默回落到 `all`；`all` 模式下验证层忽略未启用的 `clients` 字段，与前端保存行为一致。
+- **运行备份与 TUN 就绪检查**：`apply_config` 在验证通过并完成启服、DNS 监听与 TUN 接口就绪（`is_tun_ready`）、`dnsmasq` 接管后，原子刷新 `sing-box.last-good.json`；失败回滚使用事务内临时备份，不污染 `last-good`。
 
-在生产代码中未发现自建的代理协议、DNS 解析器、设备探测守护进程或 nftables 转发引擎。节点测速选择交由 sing-box 原生代理组，设备 MAC 匹配交由原生邻居解析，现有定时订阅使用 OpenWrt cron。字段和版本依据见 [sing-box 路由规则](https://sing-box.sagernet.org/configuration/route/rule/)、[邻居解析](https://sing-box.sagernet.org/configuration/shared/neighbor/)与 [Tailscale Endpoint](https://sing-box.sagernet.org/configuration/endpoint/tailscale/)。
+在生产代码中未发现自建的代理协议、DNS 解析器、设备探测守护进程或 nftables 转发引擎。节点测速选择交由 sing-box 原生代理组，设备 MAC 匹配交由原生邻居解析。字段和版本依据见 [sing-box 路由规则](https://sing-box.sagernet.org/configuration/route/rule/)、[邻居解析](https://sing-box.sagernet.org/configuration/shared/neighbor/)与 [Tailscale Endpoint](https://sing-box.sagernet.org/configuration/endpoint/tailscale/)。
 
-### 最小实施顺序
+### 实施与验证里程碑
 
-1. 阶段一：提交本审计，保留现有 Profile、UCI 和生成架构（已完成）。
-2. 阶段二：设备阶段锁定当前规则顺序，补 LuCI 保存与重读、IPv4/IPv6/MAC、1.14.4 核心检查与真机实测证据（已完成）。
-3. 阶段三：Tailscale 阶段使用合成数据完成 LuCI 测试与 1.14.4 Endpoint 离线核心校验；待维护者提供专用测试环境后再验证真实 Tailnet / Headscale 控制面、路由和状态持久化（离线部分已完成，在线真机待验）。
-4. 阶段四：部署复核 procd、校验、原子替换、失败恢复、DNS 清理与安装包，按维护者决定将两项 RC1 遗留项更新为「不处理」并保留旧验收事实（已完成）。
-5. 最终复跑构建、测试、真实 1.14.4 核心、语法检查与非破坏性硬件复核；官方 24.10.8 / 25.12.6 固件运行结论等待对应环境。
+1. 阶段一：架构审计与规划对照（已完成）。
+2. 阶段二：设备分流规则锁定、LuCI 与真机客户端实测（已完成）。
+3. 阶段三：Tailscale 离线核心校验与专用 Headscale 真机闭环联调（已完成；官方 Tailscale 控制面不考虑）。
+4. 阶段四：部署事务、SysRq 硬复位断电恢复、RC1 维护者决策（已完成）。
+5. r4 收口：移除订阅管理、修复 24.10 `mkdtemp` 兼容性与上述边界、补齐 Clash API / 分片上传 / 多 Profile / `Non-CN` 真机验证，以及官方 OpenWrt 24.10.8 / 25.12.6 QEMU VM 实机安装运行验证（已完成）。
 
 ### 设备分流验证
 
@@ -126,7 +126,7 @@ mv -f "$temp" /etc/singsing/sing-box.json
   - **MagicDNS 与对端/子网互通**：Debian 局域网客户端经路由器 DNS 解析对端 FQDN MagicDNS 成功并 `ping` 通对端 IP 与 FQDN（0% 丢包）；路由器通告独立测试子网 `198.51.100.0/24` 经 Headscale 批准后，对端节点 `ping` 通该通告子网（0% 丢包）。无后缀单标签主机名受 `src/adapter/dns.ts` 的 `^[^.]+$` 保护规则优先拦截返回 `NXDOMAIN`。
   - **Exit Node 与按 tag 选流**：直连对照请求返回路由器 WAN 出口 IP；按 Tailscale tag 分流的 HTTP 请求经在线 Exit Node 出口返回对端公网 IP，核心日志确认命中 `endpoint/tailscale[hs-live]`；独立配置 `advertise_exit_node: true` 后 Headscale 收到 `0.0.0.0/0` 与 `::/0` 并批准生效。
   - **凭据脱敏与现场还原**：全量 `logread` 核对临时预授权密钥及控制面 API 密钥出现次数均为 `0`；验证结束后已删除临时 Headscale 节点并使临时密钥过期，路由器停服还原备份，UCI、DHCP、防火墙与活动配置 SHA-256 全部一致。
-- 官方 Tailscale 控制面实机联调与 1.15 新增字段仍标为待验/后续版本事项。
+- 官方 Tailscale 控制面实机联调按维护者决定不考虑；1.15 新增字段作为后续版本随上游同步事项。
 
 ## 开发与测试
 
@@ -159,17 +159,19 @@ make package/luci-app-singsing/compile V=s
 
 修改前，LuCI 补测复现 12 项故障，应用事务补测复现 5 项故障。第五阶段分别复现 1 项 UCI 会话提交故障和 2 项可选 ECS 表单故障。修复后的回归包含在上述 Vitest 结果中。
 
-MVP 完成后的整机重启、自启、IPv6、升级、安全及卸载复测记录在 [RC1 真机验收](docs/rc1-validation.md)。OpenWrt 24.10.8 与 25.12.6 官方固件运行和整机断电恢复仍未验证。
+MVP 完成后的整机重启、自启、IPv6、升级、安全、SysRq 硬复位断电恢复及卸载复测记录在 [RC1 真机验收](docs/rc1-validation.md)。
 
-### 阶段二至阶段四补充验证
+### r4 补充验证（含官方 OpenWrt 24.10.8 / 25.12.6 虚拟机）
 
 | 验证环境 | 执行内容 | 结果 |
 | --- | --- | --- |
-| 本地 Vitest（Mock） | `npm ci && npm run build && npm test` | 123 项通过（覆盖适配器、LuCI 节点/DNS/分流/设备/Tailscale 往返与边界、服务应用事务原子替换与回滚）。另有 7 项核心用例由独立命令运行。 |
-| 语法与静态检查 | POSIX `sh -n`、JSON 解析与 LuCI JS 语法检查 | 4 个 Shell 脚本、3 个 JSON 与 13 个 LuCI JS 文件全部通过。 |
-| sing-box 1.14.4（Linux ARM64） | `SINGSING_SING_BOX=/path/to/sing-box npm run test:sing-box` | 7 项全部通过（1.14.4 版本、Direct/GFWList、设备白/黑名单、官方+Headscale Tailscale Endpoint/MagicDNS/代理组、缺失规则集失败保护）。 |
-| OpenWrt 正式 SDK（r3） | `git diff 242d10a -- root/ htdocs/ src/ Makefile` 核对 | 阶段一至阶段四未修改打包运行文件，已验 r3 `.ipk` / `.apk` 产物内容保持一致。 |
-| LibWrt 25.12-SNAPSHOT 真机与 Debian | 非破坏性核对 r3 实装文件、`ash`/`ucode` 语法、1.14.4 `with_tailscale` 核心离线 `check`、设备分流、专用 Headscale 真机联调与 SysRq 硬复位（断电恢复）验证 | 9/9 核心运行文件 SHA-256 与仓库一致；Headscale 联调全项及日志零凭据泄露通过；`auto_start=1` 硬复位后自动恢复 TUN/DNS/转发且可继续 `apply_config`，`auto_start=0` 硬复位后无 DNS 黑洞；还原后校验和一致，服务停用无残留，Debian 链路正常；官方 Tailscale 控制面与官方 24.10.8 / 25.12.6 固件运行待验。 |
+| 本地 Vitest（Mock） | `npm run build && npm test` | 127 项通过（含 Tailscale 互斥/单标签 MagicDNS 排序、访问控制失败阻断、`all` 模式旧列表忽略、TUN 就绪回滚与首次 `last-good` 写入）。另有 9 项 Linux 核心用例由独立命令运行。 |
+| 语法与静态检查 | POSIX `sh -n`、JSON 解析与 LuCI JS 语法检查 | 4 个 Shell 脚本、3 个 JSON 与 11 个 LuCI JS 文件全部通过，无订阅模块残留引用。 |
+| sing-box 1.14.4（Linux ARM64） | `SINGSING_SING_BOX=... npm run test:sing-box` | 9 项全部通过（1.14.4 版本、Direct / GFWList / Non-CN / Global 四模式、设备白/黑名单、官方+Headscale Tailscale Endpoint/MagicDNS/代理组、缺失规则集失败保护）。 |
+| OpenWrt 正式 SDK（r4） | 24.10.8 SDK 构建 `.ipk` + 25.12.6 SDK 构建 `.apk` + `verify-openwrt-package.sh` | 两包均通过版本（`0.1.0-r4`）、依赖（含 `kmod-nft-queue`）、安装卸载钩子与文件一致性校验。 |
+| 官方 OpenWrt 24.10.8 VM（QEMU `armsr/armv8`） | `opkg update && opkg install` r4 `.ipk` + `sing-box 1.14.4`（musl）+ `apply_config` + Clash API + 分片上传 + 多 Profile + `opkg remove` | 发现并修复了 24.10.8 `ucode-mod-fs` 无 `mkdtemp` 导致 RPC 加载失败的兼容性问题；修复后重编 r4 `.ipk` 全链路通过（`rpcd` 立即注册、`singtun`、nftables `table inet sing-box`、`dnsmasq` drop-in、`last-good`、Clash API 204、卸载清理）。 |
+| 官方 OpenWrt 25.12.6 VM（QEMU `armsr/armv8`） | `apk update && apk add` r4 `.apk` + `sing-box 1.14.4`（musl）+ `apply_config` + Clash API + 分片上传 + 多 Profile + `apk del` | 全链路通过（依赖自动安装含 `kmod-nft-queue`、`rpcd` 注册、`singtun`、nftables `auto_redirect`、`dnsmasq` drop-in、`last-good`、Clash API 204、卸载清理）。 |
+| LibWrt 25.12-SNAPSHOT 真机与 Debian | r3 → r4 升级、遗留 `# singsing-sub` cron 自动清理、`Non-CN` 模式、Clash API（204 模式/代理切换、分组测速、连接管理、SSRF/路径穿越拦截）、并发连通性检测、300KB 分片上传、多 Profile CRUD、Headscale 联调与 SysRq 硬复位 | 全项通过；最终路由器实装 r4 文件 SHA-256 与仓库一致，现场备份还原后校验和一致，服务停用无残留。 |
 
 ## 致谢
 

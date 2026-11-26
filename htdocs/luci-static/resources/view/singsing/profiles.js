@@ -155,7 +155,7 @@ return view.extend({
 					(!isActive && name !== 'default') ? E('button', {
 						'class': 'btn cbi-button-remove',
 						'click': function() {
-							if (!window.confirm('确定删除配置方案「' + name + '」及其绑定的订阅吗？')) return;
+							if (!window.confirm('确定删除配置方案「' + name + '」吗？')) return;
 							api.deleteProfile(name).then(reloadPage);
 						}
 					}, '删除') : ''

@@ -20,7 +20,7 @@ function run(...args: string[]) {
 
 function generatedConfig(
   dir: string,
-  mode: "GFWList" | "Direct" = "Direct",
+  mode: "GFWList" | "Non-CN" | "Global" | "Direct" = "Direct",
   accessControl?: OpenWrtAccessControl,
   customize?: (p: Profile) => void,
 ) {
@@ -79,7 +79,7 @@ describe.skipIf(process.env.SINGSING_VERIFY_CORE !== "1")("sing-box 1.14.4 binar
     expect(run("version").split("\n")[0]).toBe("sing-box version 1.14.4");
   });
 
-  it.each(["Direct", "GFWList"] as const)("checks generated JSON, Schema and the real core in %s mode", (mode) => {
+  it.each(["Direct", "GFWList", "Non-CN", "Global"] as const)("checks generated JSON, Schema and the real core in %s mode", (mode) => {
     const f = serviceApplyFixture();
     try {
       const { config, ruleSets } = generatedConfig(f.dir, mode);

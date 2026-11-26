@@ -63,10 +63,20 @@ export function adaptDns(config: Json, settings: OpenWrtSettings): void {
   }
 
   if (Array.isArray(dnsObj.rules)) {
+    let localDomainRule: Json | null = null;
+    const magicDnsRules: Json[] = [];
     const adaptedRules: Json[] = [];
+
     for (const rule of dnsObj.rules) {
       // Drop `preferred_by: "local"` since `local` is now an explicit external DNS server.
       if (rule.preferred_by === "local") continue;
+
+      // Keep Tailscale MagicDNS rules ahead of single-label NXDOMAIN protection so single-label
+      // tailnet peer names resolve via MagicDNS while .lan/.home.arpa remain strictly local.
+      if (typeof rule.preferred_by === "string" && rule.action === "route") {
+        magicDnsRules.push(rule);
+        continue;
+      }
 
       // LAN domains and single-label hostnames are resolved by dnsmasq; never forward them to external DNS.
       if (isLocalDomainsRouteRule(rule)) {
@@ -76,15 +86,18 @@ export function adaptDns(config: Json, settings: OpenWrtSettings): void {
         const domain = Array.from(
           new Set([...(Array.isArray(rest.domain) ? (rest.domain as string[]) : []), ...bareRoots]),
         );
-        const existingRegex = Array.isArray(rest.domain_regex) ? (rest.domain_regex as string[]) : [];
-        const domain_regex = existingRegex.includes("^[^.]+$") ? existingRegex : [...existingRegex, "^[^.]+$"];
-        adaptedRules.unshift({ ...rest, domain, domain_regex, action: "predefined", rcode: "NXDOMAIN" });
+        localDomainRule = { ...rest, domain, action: "predefined", rcode: "NXDOMAIN" };
         continue;
       }
 
       adaptedRules.push(rule);
     }
-    dnsObj.rules = adaptedRules;
+
+    const prefixRules: Json[] = [];
+    if (localDomainRule) prefixRules.push(localDomainRule);
+    prefixRules.push(...magicDnsRules);
+    if (localDomainRule) prefixRules.push({ domain_regex: ["^[^.]+$"], action: "predefined", rcode: "NXDOMAIN" });
+    dnsObj.rules = [...prefixRules, ...adaptedRules];
   }
 
   // Add dedicated dns-in direct inbound for dnsmasq forwarding.
