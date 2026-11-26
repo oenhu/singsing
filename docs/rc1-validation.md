@@ -63,4 +63,4 @@ r3 建议用于带已知限制的预发布。RC1 验收时曾记录两项待处�
 
 - **场景一（`enabled=1, auto_start=1` 运行态硬复位）**：在 `sing-box`、`singtun` 与 RAM `dnsmasq` 接管生效时触发硬复位；约 83 秒恢复 SSH 后确认产生新 `boot_id`，`procd` 自动拉起 `sing-box`、`singtun`、`cache.db` 与 `dnsmasq-singsing.conf`，无残留事务文件；5 项持久化配置（UCI、DHCP、防火墙、活动 JSON、规则集清单）SHA-256 全部一致；Debian 客户端 DNS、直连访问及 `tun-in` 规则接管恢复正常，硬复位后再次执行 `apply_config` 通过（无残留锁）。
 - **场景二（`enabled=1, auto_start=0` 且 RAM `dnsmasq` 接管生效时硬复位）**：触发第二次硬复位后确认产生新 `boot_id`，`/tmp` 内存盘 `dnsmasq-singsing.conf` 随断电自动清除、`/etc/config/dhcp` 未被修改、`sing-box` 保持停用；Debian 客户端无需任何人工干预即直接恢复正常 DNS 与直连访问（无 DNS 黑洞）。
-- 验证结束后从本机备份还原路由器配置，5 项基线文件 SHA-256 全部一致，确认 `sing-box` 无残留进程、无 `singtun`、无 `dnsmasq` drop-in。
+- 验证结束后从本机备份还原路由器配置，5 项基线文件 SHA-256 全部一致，确认 `sing-box` 无残留进程、无 `singtun`、无 `dnsmasq` drop-in。维护者已确认上述硬复位验证足以覆盖断电恢复场景，不再单独要求物理拔电测试。
