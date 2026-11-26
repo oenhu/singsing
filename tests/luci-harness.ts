@@ -80,7 +80,8 @@ export async function click(root: Element, label: string) {
 
 type Reply = Record<string, unknown>;
 type UciValues = Record<string, Record<string, string | null>>;
-type RpcHandler = (params: Reply) => Reply | Promise<Reply>;
+type RpcResult = Reply | number;
+type RpcHandler = (params: Reply) => RpcResult | Promise<RpcResult>;
 
 export type ApplyReply = {
   ok: boolean;
@@ -96,6 +97,7 @@ type Api = {
   applyWithNotify(): Promise<ApplyReply | undefined>;
   loadActiveProfile(): Promise<{ name: string; profile: Profile }>;
   status(): Promise<Reply>;
+  switchActiveProfile(name: string): Promise<void>;
 };
 
 type View = {
@@ -143,7 +145,12 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
   }
 
   const uci = {
-    load: async () => { cache = structuredClone(committed); },
+    load: async () => {
+      cache = structuredClone(committed);
+      for (const [section, entries] of Object.entries(staged)) {
+        Object.assign(cache[section] ??= {}, entries);
+      }
+    },
     unload: () => { cache = {}; },
     get: (_package: string, section: string, option: string) => cache[section]?.[option],
     set: (_package: string, section: string, option: string, value: string) => {
@@ -177,12 +184,15 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
       profiles.set(String(name), String(profile));
       return { ok: true };
     },
-    commit_uci() {
+    // The standalone cursor cannot see deltas in the LuCI session's save directory.
+    commit_uci: () => ({ ok: true }),
+    commit({ config }) {
+      if (config !== "singsing") throw new Error("Unexpected package commit");
       for (const [section, entries] of Object.entries(staged)) {
         Object.assign(committed[section] ??= {}, entries);
       }
       staged = {};
-      return { ok: true };
+      return 0;
     },
     status: () => status,
     get_ruleset_urls: () => ({ urls: {} }),
@@ -199,7 +209,8 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
   const rpc = {
     declare({ object, method, params = [] }: { object: string; method: string; params?: string[] }) {
       return async (...values: unknown[]) => {
-        if (object !== "luci.singsing") throw new Error(`Unexpected RPC object: ${object}`);
+        const expectedObject = method === "commit" ? "uci" : "luci.singsing";
+        if (object !== expectedObject) throw new Error(`Unexpected RPC object: ${object}`);
         const input = Object.fromEntries(params.map((name, i) => [name, values[i]]));
         calls.push({ method, params: input });
         const handler = overrides[method] ?? handlers[method];
@@ -213,9 +224,11 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
     section: string;
     name: string;
     default?: string;
+    rmempty?: boolean;
     cfgvalue?(section: string): string;
     formvalue(): string | null | undefined;
     write?(section: string, value: string): void;
+    remove?(section: string): void;
     value(): void;
     depends(): void;
   };
@@ -251,8 +264,16 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
 
     async save() {
       for (const [option, value] of this.edits) {
-        if (option.write) option.write(option.section, value);
-        else uci.set("singsing", option.section, option.name, value);
+        if (value === "") {
+          if (option.rmempty === false)
+            throw new Error(`Missing required field: ${option.name}`);
+          if (option.remove) option.remove(option.section);
+          else uci.unset("singsing", option.section, option.name);
+        } else if (option.write) {
+          option.write(option.section, value);
+        } else {
+          uci.set("singsing", option.section, option.name, value);
+        }
       }
       this.edits.clear();
       await uci.save();
@@ -266,6 +287,9 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
 
   return {
     api, calls, notifications, active, profiles, status,
+    committedOption(section: string, option: string) {
+      return committed[section]?.[option];
+    },
     override(method: string, handler: RpcHandler) { overrides[method] = handler; },
     modal() {
       if (!modal) throw new Error("No open LuCI modal");

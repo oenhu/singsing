@@ -148,8 +148,8 @@ describe("LuCI configuration round trips", () => {
     expect(row(reopened.root, "domain:split.example").textContent).toContain("remote");
     expect(await reopened.view.handleSaveApply()).toMatchObject({ ok: true });
     const methods = h.calls.map(({ method }) => method);
-    expect(methods.indexOf("commit_uci")).toBeGreaterThanOrEqual(0);
-    expect(methods.indexOf("commit_uci")).toBeLessThan(methods.indexOf("apply_config"));
+    expect(methods.indexOf("commit")).toBeGreaterThanOrEqual(0);
+    expect(methods.indexOf("commit")).toBeLessThan(methods.indexOf("apply_config"));
     const { config } = applied(h);
     expect(config.dns.servers).toContainEqual(expect.objectContaining({
       tag: "local", type: "https", server: "9.9.9.9", server_port: 8443, path: "/mvp-query",
@@ -259,9 +259,33 @@ describe("LuCI configuration round trips", () => {
 });
 
 describe("MVP regression cases", () => {
-  it("does not continue Save & Apply after commit_uci returned ok:false", async () => {
+  it.each(["", "192.0.2.0/24"])("saves with optional ECS blank (previously %j)", async (previous) => {
+    const initial = profile();
+    initial.settings.clientSubnet = previous;
+    const h = luci(initial);
+    const { view, form } = await h.view("settings");
+    form!.edit("dns._client_subnet", "");
+    form!.edit("dns.local_server", "9.9.9.9");
+    await view.handleSave();
+    expect(h.committedOption("dns", "local_server")).toBe("9.9.9.9");
+    expect((await h.api.loadActiveProfile()).profile.settings.clientSubnet).toBe("");
+  });
+
+  it("persists the active profile outside the LuCI session", async () => {
     const h = luci(profile());
-    h.override("commit_uci", () => ({ ok: false, error: "UCI write failed" }));
+    h.profiles.set("alternate", JSON.stringify(profile()));
+    await h.api.switchActiveProfile("alternate");
+    expect(h.committedOption("main", "active_profile")).toBe("alternate");
+    expect(await h.api.loadActiveProfile()).toMatchObject({ name: "alternate" });
+  });
+
+  it.each([
+    ["native commit rejects", (): never => { throw new Error("UCI write failed"); }],
+    ["native commit returns an error code", (): number => 10],
+    ["native commit leaves pending changes", (): number => 0],
+  ] as const)("does not continue Save & Apply when %s", async (_scenario, result) => {
+    const h = luci(profile());
+    h.override("commit", result);
     const { view, form } = await h.view("settings");
     form!.edit("dns.local_server", "9.9.9.9");
     await expect(view.handleSaveApply()).rejects.toThrow(/UCI|提交/);

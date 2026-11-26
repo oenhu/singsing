@@ -178,7 +178,6 @@ return view.extend({
 
 		o = s.taboption('remote', form.Value, '_client_subnet', 'EDNS Client Subnet（可选）', '发送给代理 DNS 的 ECS 网段，留空则禁用');
 		o.placeholder = '例如 1.2.3.0/24';
-		o.rmempty = false;
 		o.cfgvalue = function() {
 			return profile.settings.clientSubnet || '';
 		};

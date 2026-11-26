@@ -55,6 +55,11 @@ case "$package" in
 	*) printf 'Unsupported OpenWrt package: %s\n' "$package" >&2; exit 1 ;;
 esac
 
+if [ -n "$(find "$work/files" -name '._*' -print -quit)" ]; then
+	printf 'Unexpected AppleDouble metadata in package payload\n' >&2
+	exit 1
+fi
+
 for dependency in libc luci-base rpcd rpcd-mod-ucode ucode ucode-mod-fs ucode-mod-uci \
 	kmod-tun kmod-nft-tproxy kmod-nft-queue kmod-nft-nat firewall4 ca-bundle curl; do
 	if ! grep -Fxq "$dependency" "$work/depends"; then
@@ -78,8 +83,11 @@ for path in etc/init.d/singsing etc/uci-defaults/99-singsing usr/share/singsing/
 	sh -n "$work/files/$path"
 	cmp "$source_dir/root/$path" "$work/files/$path"
 done
-cmp "$source_dir/root/etc/config/singsing" "$work/files/etc/config/singsing"
-cmp "$source_dir/root/usr/share/rpcd/ucode/singsing.uc" "$work/files/usr/share/rpcd/ucode/singsing.uc"
-cmp "$source_dir/htdocs/luci-static/resources/singsing/engine-bundle.js" \
-	"$work/files/www/luci-static/resources/singsing/engine-bundle.js"
+for path in etc/config/singsing usr/share/rpcd/ucode/singsing.uc usr/share/rpcd/acl.d/luci-app-singsing.json; do
+	cmp "$source_dir/root/$path" "$work/files/$path"
+done
+for path in luci-static/resources/singsing/api.js luci-static/resources/singsing/engine-bundle.js \
+	luci-static/resources/view/singsing/settings.js; do
+	cmp "$source_dir/htdocs/$path" "$work/files/www/$path"
+done
 printf 'Verified %s: version %s, dependencies, hooks and payload\n' "$package" "$expected_version"

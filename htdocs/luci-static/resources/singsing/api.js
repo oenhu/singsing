@@ -11,9 +11,10 @@ var callStatus = rpc.declare({
 });
 
 var callCommitUci = rpc.declare({
-	object: 'luci.singsing',
-	method: 'commit_uci',
-	expect: {}
+	object: 'uci',
+	method: 'commit',
+	params: ['config'],
+	reject: true
 });
 
 var callGetProfile = rpc.declare({
@@ -338,16 +339,21 @@ function applyUciIfChanged() {
 	return uci.save().then(function() {
 		return uci.changes();
 	}).then(function(changes) {
-		if (changes && changes.singsing && Object.keys(changes.singsing).length > 0) {
-			return callCommitUci().catch(function(err) {
-				throw new Error('提交 UCI 设置失败：' + err.message);
-			}).then(function(res) {
-				if (!res || res.ok !== true)
-					throw new Error('提交 UCI 设置失败：' + ((res && (res.error || res.output)) || 'UCI 未确认提交'));
-				return reloadUciSingsing();
-			});
-		}
-		return Promise.resolve();
+		if (!changes || !changes.singsing || !Object.keys(changes.singsing).length)
+			return;
+
+		// LuCI stages changes in its RPC session's UCI save directory.
+		return callCommitUci('singsing').then(function(code) {
+			if (code !== 0)
+				throw new Error('UCI 未确认提交');
+			return uci.changes();
+		}).then(function(pending) {
+			if (pending && pending.singsing && Object.keys(pending.singsing).length)
+				throw new Error('UCI 仍有未提交的 singsing 设置');
+			return reloadUciSingsing();
+		}).catch(function(err) {
+			throw new Error('提交 UCI 设置失败：' + err.message);
+		});
 	});
 }
 
