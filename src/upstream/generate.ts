@@ -6,11 +6,12 @@ type Json = Record<string, unknown>;
 
 const URL_TEST = { url: "https://www.gstatic.com/generate_204", interval: "3m", tolerance: 50, idle_timeout: "30m" };
 
-/** Generated outbounds that routing rules may select without a node or group id. */
+/** Built-in routing targets that can be selected without a node or group id. */
 export const BUILT_IN_RULE_TARGETS = [
   { id: "proxy", tag: "proxy", kind: "默认选择器" },
   { id: "auto", tag: "auto", kind: "自动测速" },
   { id: "direct", tag: "direct", kind: "直连" },
+  { id: "reject", tag: "reject", kind: "拦截" },
 ];
 
 const GFW = ["gfwlist", "gfwlist-custom-domains"];
@@ -402,10 +403,10 @@ function listedIpSets(s: Settings, rules: BuiltRule[]): string[] {
 
 const oneOrList = (xs: string[]) => (xs.length === 1 ? xs[0] : xs);
 
-/** Matches routed direct by the first applicable rule, before the proxy list and mode defaults. */
-function directRuleMatch(rules: BuiltRule[], content: "domain" | "ip"): Json | undefined {
-  const earlierProxy: Json[] = [];
-  const direct: Json[] = [];
+/** Matches whose first applicable custom rule has the selected target. */
+function firstRuleMatch(rules: BuiltRule[], content: "domain" | "ip", selected: (rule: BuiltRule) => boolean): Json | undefined {
+  const earlierOther: Json[] = [];
+  const chosen: Json[] = [];
   for (const r of rules) {
     const sets = r.sets.filter((x) => x.content === content).map((x) => x.tag);
     const entries = content === "domain"
@@ -414,14 +415,17 @@ function directRuleMatch(rules: BuiltRule[], content: "domain" | "ip"): Json | u
     const matches = [...(entries ? [entries] : []), ...(sets.length ? [{ rule_set: oneOrList(sets) }] : [])];
     if (!matches.length) continue;
     const match = or(matches);
-    if (r.tag === "direct") {
-      direct.push(earlierProxy.length ? and([match, or([...earlierProxy], { invert: true })]) : match);
+    if (selected(r)) {
+      chosen.push(earlierOther.length ? and([match, or([...earlierOther], { invert: true })]) : match);
     } else {
-      earlierProxy.push(match);
+      earlierOther.push(match);
     }
   }
-  return direct.length ? or(direct) : undefined;
+  return chosen.length ? or(chosen) : undefined;
 }
+
+const directRuleMatch = (rules: BuiltRule[], content: "domain" | "ip") =>
+  firstRuleMatch(rules, content, (r) => r.tag === "direct");
 
 /**
  * Domains whose traffic the route rules send `direct` regardless of the resolved IP.
@@ -441,14 +445,19 @@ function directByDomain(s: Settings, proxied: string[], ruleDirect?: Json): Json
   ]);
 }
 
-/** Custom proxy and rule domains, outside Direct mode and unless also listed as direct. */
-const proxiedByDomain = (proxied: string[], ruleDirect?: Json): Json =>
-  and([
-    { clash_mode: "Direct", invert: true },
-    { rule_set: CUSTOM_DIRECT, invert: true },
+/** Explicit proxy rules take priority over the default mode, including Direct. */
+function proxiedByDomain(proxied: string[], ruleDirect?: Json, ruleProxy?: Json, ruleReject?: Json): Json {
+  const directListMatch = and([{ clash_mode: "Global", invert: true }, { rule_set: CUSTOM_DIRECT }]);
+  return and([
+    { ...directListMatch, invert: true },
     ...(ruleDirect ? [{ ...ruleDirect, invert: true }] : []),
-    { rule_set: oneOrList(proxied) },
+    ...(ruleReject ? [{ ...ruleReject, invert: true }] : []),
+    or([
+      ...(ruleProxy ? [ruleProxy] : []),
+      and([{ clash_mode: "Direct", invert: true }, { rule_set: oneOrList(proxied) }]),
+    ]),
   ]);
+}
 
 /**
  * DNS policy:
@@ -465,12 +474,15 @@ function dnsRules(s: Settings, rules: BuiltRule[], dnsChoices: BuiltDnsRule[]): 
   const ecs = s.clientSubnet.trim() ? { client_subnet: s.clientSubnet.trim() } : {};
   const proxied = proxiedSets(s, rules);
   const ruleDirect = directRuleMatch(rules, "domain");
+  const ruleProxy = firstRuleMatch(rules, "domain", (r) => r.tag !== "direct" && r.rule.outbound !== "reject");
+  const ruleReject = firstRuleMatch(rules, "domain", (r) => r.rule.outbound === "reject");
   const direct = directByDomain(s, proxied, ruleDirect);
+  const proxyMatch = proxiedByDomain(proxied, ruleDirect, ruleProxy, ruleReject);
   const magicDns: Json[] = s.tailnets.filter((t) => t.magicDns).map((t) => ({ preferred_by: dnsTag(t), action: "route", server: dnsTag(t) }));
   const customProxy: Json[] = proxied.length
     ? [
-        and([{ query_type: IPV6_CARRIERS }, proxiedByDomain(proxied, ruleDirect)], { action: "predefined", rcode: "NOERROR" }),
-        { ...proxiedByDomain(proxied, ruleDirect), action: "route", server: "remote" },
+        and([{ query_type: IPV6_CARRIERS }, proxyMatch], { action: "predefined", rcode: "NOERROR" }),
+        { ...proxyMatch, action: "route", server: "remote" },
       ]
     : [];
   // Domains with a chosen DNS server: the IPv6 policy still follows how their traffic is routed.
@@ -481,7 +493,7 @@ function dnsRules(s: Settings, rules: BuiltRule[], dnsChoices: BuiltDnsRule[]): 
     ...(dnsChoices.some((r) => !r.tailnet)
       ? [
         ...(proxied.length
-          ? [and([{ query_type: IPV6_CARRIERS }, chosenSet, proxiedByDomain(proxied, ruleDirect)], { action: "predefined", rcode: "NOERROR" })]
+          ? [and([{ query_type: IPV6_CARRIERS }, chosenSet, proxyMatch], { action: "predefined", rcode: "NOERROR" })]
           : []),
         and([{ query_type: "AAAA" }, noPublicV6Interface, chosenSet, direct], { action: "predefined", rcode: "NOERROR" }),
         // Not known to go direct (in Non-CN mode it depends on the answer): treated as proxied, IPv4 only.
@@ -643,16 +655,19 @@ function routeRules(s: Settings, rules: BuiltRule[]): Json[] {
     ...s.tailnets.map((t) => ({ preferred_by: t.tag, action: "route", outbound: t.tag })),
     ...tailnetExtra,
     { ...LOCAL_DOMAINS, action: "route", outbound: "direct" },
-    { ip_is_private: true, action: "route", outbound: "direct" },
-    { clash_mode: "Direct", action: "route", outbound: "direct" },
     and([{ clash_mode: "Global", invert: true }, { rule_set: oneOrList(directSets(s)) }], { action: "route", outbound: "direct" }),
     // A rule's own entries, then its rule-sets: kept apart so a set is not merged into the entries' match.
-    ...rules.flatMap((r) => [
-      ...(matchCount(r.domains) + r.cidrs.length
-        ? [{ ...matchFields(r.domains), ...(r.cidrs.length ? { ip_cidr: r.cidrs } : {}), action: "route", outbound: r.tag }]
-        : []),
-      ...(r.sets.length ? [{ rule_set: oneOrList(r.sets.map((x) => x.tag)), action: "route", outbound: r.tag }] : []),
-    ]),
+    ...rules.flatMap((r) => {
+      const action = r.rule.outbound === "reject" ? { action: "reject" } : { action: "route", outbound: r.tag };
+      return [
+        ...(matchCount(r.domains) + r.cidrs.length
+          ? [{ ...matchFields(r.domains), ...(r.cidrs.length ? { ip_cidr: r.cidrs } : {}), ...action }]
+          : []),
+        ...(r.sets.length ? [{ rule_set: oneOrList(r.sets.map((x) => x.tag)), ...action }] : []),
+      ];
+    }),
+    { ip_is_private: true, action: "route", outbound: "direct" },
+    { clash_mode: "Direct", action: "route", outbound: "direct" },
     ...(hasProxyRules(s) ? [{ rule_set: CUSTOM_PROXY, action: "route", outbound: "proxy" }] : []),
     and([{ clash_mode: "GFWList" }, { rule_set: gfwAll, invert: true }], { action: "route", outbound: "direct" }),
     and(

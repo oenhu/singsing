@@ -237,7 +237,7 @@ return view.extend({
 			];
 			if (!rules.length) {
 				rows.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;opacity:0.7;' }, '暂无自定义路由规则（按顺序匹配，优先级高于默认代理列表与分流模式）。')
+					E('td', { 'class': 'td', 'colspan': '5', 'style': 'text-align:center;opacity:0.7;' }, '暂无自定义路由规则。')
 				]));
 			} else {
 				rules.forEach(function(r, idx) {
@@ -585,7 +585,8 @@ return view.extend({
 			]),
 
 			E('div', { 'class': 'cbi-section', 'style': 'margin-top:16px;' }, [
-				E('h3', {}, '有序自定义路由规则（指定节点 / 代理组 / 规则集）'),
+				E('h3', {}, '有序自定义路由规则'),
+				E('p', {}, '支持代理、直连、拦截及指定节点或代理组。内置保护和适用的直连列表优先，自定义规则按顺序匹配，优先于默认代理列表和分流模式。'),
 				E('div', {}, [
 					E('button', {
 						'class': 'btn cbi-button-add',

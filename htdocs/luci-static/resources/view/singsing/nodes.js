@@ -56,6 +56,14 @@ return view.extend({
 			});
 		};
 
+		var detourUsers = function(node) {
+			return profile.nodes.filter(function(other) {
+				if (other.id === node.id) return false;
+				var parsed = engine.nodeObject(other);
+				return parsed.object && parsed.object.detour === node.tag;
+			});
+		};
+
 		var openEditModal = function(node, isNew) {
 			var tagInput = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'value': node.tag, 'style': 'width:100%;' });
 			var inGroupsChk = E('input', { 'type': 'checkbox', 'checked': node.inGroups ? 'checked' : null });
@@ -113,7 +121,16 @@ return view.extend({
 								profile.nodes.push(draft);
 							} else {
 								var idx = profile.nodes.findIndex(function(n) { return n.id === node.id; });
-								if (idx >= 0) profile.nodes[idx] = draft;
+								if (idx >= 0) {
+									if (draft.tag !== node.tag) {
+										detourUsers(node).forEach(function(other) {
+											var body = engine.parseJsonc(other.body);
+											body.detour = draft.tag;
+											other.body = JSON.stringify(body, null, 2);
+										});
+									}
+									profile.nodes[idx] = draft;
+								}
 							}
 							ui.hideModal();
 							persist('节点「' + draft.tag + '」已保存');
@@ -275,6 +292,11 @@ return view.extend({
 							E('button', {
 								'class': 'btn cbi-button-remove',
 								'click': function() {
+									var users = detourUsers(n);
+									if (users.length) {
+										notify('error', '节点仍被 detour 引用：' + users.map(function(user) { return user.tag; }).join('、') + '。请先修改这些节点。');
+										return;
+									}
 									if (!window.confirm('确定删除节点「' + n.tag + '」吗？')) return;
 									profile.nodes = profile.nodes.filter(function(x) { return x.id !== n.id; });
 									persist('已删除节点「' + n.tag + '」');

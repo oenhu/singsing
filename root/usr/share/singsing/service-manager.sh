@@ -199,21 +199,49 @@ get_dnsmasq_conf_file() {
 	printf '%s/dnsmasq-singsing.conf' "$conf_dir"
 }
 
+get_config_dns_field() {
+	CONFIG_FILE="$SB_CONFIG" DNS_FIELD="$1" ucode -e '
+		import { readfile } from "fs";
+		let config = json(readfile(getenv("CONFIG_FILE")) || "{}");
+		for (let inbound in (config?.inbounds || [])) {
+			if (inbound?.tag != "dns-in") continue;
+			let value = inbound[getenv("DNS_FIELD")];
+			if (value == null || value == "") exit(1);
+			print(value);
+			exit(0);
+		}
+		exit(1);
+	'
+}
+
+reload_dnsmasq() {
+	if ! /etc/init.d/dnsmasq restart >/dev/null 2>&1 && ! /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
+		printf 'dnsmasq restart and reload both failed\n' >&2
+		return 1
+	fi
+	if ! wait_port_listening 53 5; then
+		printf 'dnsmasq did not resume listening on port 53\n' >&2
+		return 1
+	fi
+}
+
 dnsmasq_takeover() {
 	local manage listen_addr listen_port main_conf conf_file conf_dir tmp_file
 	manage="$(uci_get "dns.dnsmasq_manage" "1")"
 	if [ "$manage" != "1" ]; then
 		dnsmasq_restore
-		return 0
+		return $?
 	fi
 
-	listen_addr="$(uci_get "dns.listen_address" "127.0.0.1")"
-	listen_port="$(uci_get "dns.listen_port" "5335")"
+	listen_addr="$(get_config_dns_field listen)" && listen_port="$(get_config_dns_field listen_port)" || {
+		printf 'Cannot read the dns-in listener from the active configuration\n' >&2
+		return 1
+	}
 	main_conf="$(get_dnsmasq_main_conf)"
 	conf_file="$(get_dnsmasq_conf_file)"
 	conf_dir="$(dirname "$conf_file")"
 
-	mkdir -p "$conf_dir"
+	mkdir -p "$conf_dir" || return 1
 	tmp_file="${conf_file}.tmp.$$"
 	{
 		printf '# Managed by luci-app-singsing (RAM drop-in, zero flash write)\n'
@@ -223,13 +251,14 @@ dnsmasq_takeover() {
 			printf 'cache-size=0\n'
 		fi
 		printf 'server=%s#%s\n' "$listen_addr" "$listen_port"
-	} > "$tmp_file"
+	} > "$tmp_file" || return 1
 
 	if [ -f "$conf_file" ] && cmp -s "$tmp_file" "$conf_file"; then
 		rm -f "$tmp_file"
-		return 0
+		wait_port_listening 53 5
+		return $?
 	fi
-	mv -f "$tmp_file" "$conf_file"
+	mv -f "$tmp_file" "$conf_file" || return 1
 
 	if [ -n "$main_conf" ] && command -v dnsmasq >/dev/null 2>&1; then
 		if ! dnsmasq --test -C "$main_conf" >/dev/null 2>&1; then
@@ -239,8 +268,7 @@ dnsmasq_takeover() {
 		fi
 	fi
 
-	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
-	wait_port_listening 53 5 || true
+	reload_dnsmasq
 }
 
 dnsmasq_restore() {
@@ -249,7 +277,7 @@ dnsmasq_restore() {
 
 	for f in "$conf_file" /tmp/dnsmasq.d/dnsmasq-singsing.conf /tmp/dnsmasq.*.d/dnsmasq-singsing.conf; do
 		if [ -f "$f" ]; then
-			rm -f "$f"
+			rm -f "$f" || return 1
 			changed=1
 		fi
 	done
@@ -281,9 +309,23 @@ dnsmasq_restore() {
 	fi
 
 	if [ "$changed" -eq 1 ]; then
-		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || /etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
-		wait_port_listening 53 5 || true
+		reload_dnsmasq
 	fi
+}
+
+restore_dnsmasq_handoff() {
+	local snapshot="$1" conf_file="$2" tmp_file
+	if [ -z "$snapshot" ]; then
+		dnsmasq_restore
+		return $?
+	fi
+	mkdir -p "$(dirname "$conf_file")" || return 1
+	tmp_file="$(mktemp "$(dirname "$conf_file")/.singsing-restore.XXXXXX")" || return 1
+	if ! cp "$snapshot" "$tmp_file" || ! mv -f "$tmp_file" "$conf_file"; then
+		rm -f "$tmp_file"
+		return 1
+	fi
+	reload_dnsmasq
 }
 
 apply_download_prefix() {
@@ -496,7 +538,7 @@ reload_if_running() {
 
 wait_dns_ready() {
 	local port timeout i pid has_sock_tool=0
-	port="$(uci_get "dns.listen_port" "5335")"
+	port="$(get_config_dns_field listen_port)" || return 1
 	timeout="${1:-10}"
 	if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
 		has_sock_tool=1
@@ -520,6 +562,17 @@ wait_dns_ready() {
 	return 1
 }
 
+wait_service_stopped() {
+	local i=0
+	while [ "$i" -lt 6 ]; do
+		[ -n "$(get_service_pid)" ] || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	printf 'sing-box is still running after stop\n' >&2
+	return 1
+}
+
 apply_config() {
 	local candidate="${1:-$TMP_NEW_CONFIG}" candidate_manifest="${2:-}"
 	ensure_dirs
@@ -529,8 +582,9 @@ apply_config() {
 			exit 1
 		}
 
-		local staged_config="" staged_manifest="" had_config=0
-		trap 'rm -f "$TX_FILE" "$staged_config" "$staged_manifest"' EXIT
+		local staged_config="" staged_manifest="" staged_backup="" previous_dns="" dns_conf=""
+		local had_config=0 was_running=0 failed_step
+		trap 'rm -f "$TX_FILE" "$staged_config" "$staged_manifest" "$staged_backup" "$previous_dns"' EXIT
 		trap 'exit 1' INT TERM
 
 		local enabled_flag local_dns auto_rollback err_out
@@ -538,9 +592,12 @@ apply_config() {
 		if [ "$enabled_flag" != "1" ]; then
 			[ "$candidate" != "$TMP_NEW_CONFIG" ] || rm -f "$TMP_NEW_CONFIG"
 			if [ -n "$(get_service_pid)" ]; then
-				/etc/init.d/singsing stop >/dev/null 2>&1 || true
+				if ! /etc/init.d/singsing stop || ! wait_service_stopped; then
+					printf 'Could not stop sing-box while applying disabled settings\n' >&2
+					exit 1
+				fi
 			fi
-			dnsmasq_restore
+			dnsmasq_restore || exit 1
 			exit 0
 		fi
 
@@ -578,9 +635,19 @@ apply_config() {
 				cp "$candidate_manifest" "$staged_manifest" || exit 1
 		fi
 
-		# 3. Backup current good config
+		# Save the current config and DNS handoff before changing either.
+		if [ -n "$(get_service_pid)" ]; then
+			was_running=1
+			dns_conf="$(get_dnsmasq_conf_file)"
+			if [ -f "$dns_conf" ]; then
+				previous_dns="$(mktemp "$TMP_DIR/.dnsmasq.XXXXXX")" &&
+					cp "$dns_conf" "$previous_dns" || exit 1
+			fi
+		fi
 		if [ -s "$SB_CONFIG" ]; then
-			cp -f "$SB_CONFIG" "$SB_LAST_GOOD" || exit 1
+			staged_backup="$(mktemp "$CONF_DIR/.last-good.XXXXXX")" &&
+				cp "$SB_CONFIG" "$staged_backup" &&
+				mv -f "$staged_backup" "$SB_LAST_GOOD" || exit 1
 			had_config=1
 		fi
 
@@ -590,29 +657,40 @@ apply_config() {
 		disable_stock_singbox >/dev/null 2>&1 || true
 
 		# 5. Restart and publish the matching manifest after the health check.
-		if SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1 &&
-			wait_dns_ready 10 && dnsmasq_takeover; then
-			if [ -z "$staged_manifest" ] || mv -f "$staged_manifest" "$MANIFEST_FILE"; then
-				exit 0
+		if ! SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart; then
+			failed_step='sing-box restart failed'
+		elif ! wait_dns_ready 10; then
+			failed_step='sing-box DNS listener did not become ready'
+		elif ! dnsmasq_takeover; then
+			failed_step='dnsmasq takeover failed'
+		elif [ -n "$staged_manifest" ] && ! mv -f "$staged_manifest" "$MANIFEST_FILE"; then
+			failed_step='Could not publish the rule-set manifest'
+		else
+			exit 0
+		fi
+		printf '%s\n' "$failed_step" >&2
+
+		# Always restore files. The setting controls whether to restart the old service.
+		auto_rollback="$(uci_get "main.auto_rollback" "1")"
+		if [ "$had_config" -eq 1 ]; then
+			if ! cp "$SB_LAST_GOOD" "$staged_config" || ! mv -f "$staged_config" "$SB_CONFIG"; then
+				printf 'Could not restore active config; the last good copy is at %s\n' "$SB_LAST_GOOD" >&2
+				had_config=0
+			elif [ "$auto_rollback" = "1" ] && [ "$was_running" -eq 1 ]; then
+				if SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart &&
+					wait_dns_ready 8 && restore_dnsmasq_handoff "$previous_dns" "$dns_conf"; then
+					printf 'Rolled back to last good config and restored the previous service\n' >&2
+					exit 2
+				fi
+				printf 'Could not restore the previous running service\n' >&2
 			fi
 		fi
 
-		# 6. Auto rollback on startup failure
-		auto_rollback="$(uci_get "main.auto_rollback" "1")"
-		if [ "$auto_rollback" = "1" ] && [ "$had_config" -eq 1 ] &&
-			cp "$SB_LAST_GOOD" "$staged_config" &&
-			mv -f "$staged_config" "$SB_CONFIG" &&
-			SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1 &&
-			wait_dns_ready 8 && dnsmasq_takeover; then
-			printf 'New config failed to start; rolled back to last good config\n' >&2
-			exit 2
+		if ! /etc/init.d/singsing stop || ! wait_service_stopped; then
+			printf 'Could not stop the failed service\n' >&2
 		fi
-
-		# Complete failure: restore dnsmasq so router retains internet access
-		dnsmasq_restore
-		/etc/init.d/singsing stop >/dev/null 2>&1 || true
-		[ "$had_config" -ne 0 ] || rm -f "$SB_CONFIG"
-		printf 'sing-box failed to start; dnsmasq restored for safety\n' >&2
+		dnsmasq_restore || printf 'Could not restore normal dnsmasq service\n' >&2
+		[ "$had_config" -ne 0 ] || rm -f "$SB_CONFIG" || printf 'Could not remove the failed active config\n' >&2
 		exit 1
 	) 9>"$LOCK_FILE"
 }
@@ -715,6 +793,7 @@ case "${1:-}" in
 	reload_if_running)      reload_if_running ;;
 	validate_config)        validate_config "${2:-$TMP_NEW_CONFIG}" ;;
 	wait_dns_ready)         wait_dns_ready "${2:-10}" ;;
+	wait_service_stopped)   wait_service_stopped ;;
 	apply_config)           apply_config "${2:-}" "${3:-}" ;;
 	cron_sync)              cron_sync ;;
 	cron_remove)            cron_remove ;;

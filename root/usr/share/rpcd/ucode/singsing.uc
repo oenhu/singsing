@@ -347,8 +347,9 @@ const methods = {
 			let name = safeProfileName(req.args.name || 'default');
 			if (!name) return { ok: false, error: 'Invalid profile name' };
 			let path = `${PROFILES_DIR}/${name}.json`;
+			if (!stat(path)) return { ok: true, exists: false, profile: null };
 			let raw = readfile(path);
-			if (!raw) return { ok: true, exists: false, profile: null };
+			if (raw == null) return { ok: false, error: 'Failed to read profile file' };
 			let parsed = safeJson(raw);
 			if (type(parsed) != 'object') return { ok: false, error: 'Corrupted profile JSON' };
 			return { ok: true, exists: true, profile: parsed };
@@ -525,16 +526,18 @@ const methods = {
 					return { ok: false, error: '必须先填写有效的直连上游 DNS IP（不可为空、域名、回环地址或路由器自身 IP）' };
 				if (c.get('singsing', 'main', 'enabled') != '1') {
 					c.set('singsing', 'main', 'enabled', '1');
-					c.commit('singsing');
+					if (!c.commit('singsing')) return { ok: false, error: '提交 UCI 启用状态失败' };
 				}
 			} else if (act == 'stop') {
 				if (c.get('singsing', 'main', 'enabled') != '0') {
 					c.set('singsing', 'main', 'enabled', '0');
-					c.commit('singsing');
+					if (!c.commit('singsing')) return { ok: false, error: '提交 UCI 停用状态失败' };
 				}
 			}
 
 			let res = runCmd(`${INIT_SCRIPT} ${act}`);
+			if (res.code == 0 && act == 'stop')
+				res = runCmd(`${SERVICE_MGR} wait_service_stopped`);
 			return { ok: res.code == 0, output: res.output };
 		}
 	},

@@ -308,11 +308,11 @@ return view.extend({
 		var runGenerateAndApply = function() {
 			return api.status().then(function(curSt) {
 				if (!curSt || !curSt.enabled) {
-					var stopTask = (curSt && (curSt.running || curSt.dnsmasq_taken_over))
-						? api.serviceAction('stop').catch(function() { return null; })
-						: Promise.resolve();
-					return stopTask.then(function() {
-						showMsg('warning', '当前「启用服务」处于关闭状态，未下载规则集且未启动 sing-box', '如需启动服务，请前往「基本设置」开启「启用服务」后保存并应用。');
+					return api.stopDisabledService(curSt).then(function(res) {
+						if (res && res.ok)
+							showMsg('warning', '当前「启用服务」处于关闭状态，未下载规则集且未启动 sing-box', '如需启动服务，请前往「基本设置」开启「启用服务」后保存并应用。');
+						else
+							showMsg('error', '停止服务失败', (res && (res.error || res.output)) || '服务未确认停止');
 						return refreshAll(true);
 					});
 				}

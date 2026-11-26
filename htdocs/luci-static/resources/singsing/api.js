@@ -205,7 +205,8 @@ function reloadUciSingsing() {
 }
 
 function readOpenWrtSettings(lanIps) {
-	return reloadUciSingsing().then(function() {
+	return Promise.all([reloadUciSingsing(), loadEngine()]).then(function(results) {
+		var engine = results[1];
 		var get = function(sec, opt, def) {
 			var v = uci.get('singsing', sec, opt);
 			return (v !== undefined && v !== null && v !== '') ? v : def;
@@ -213,10 +214,11 @@ function readOpenWrtSettings(lanIps) {
 		var bool = function(sec, opt, def) {
 			return get(sec, opt, def ? '1' : '0') === '1';
 		};
-		var num = function(sec, opt, def) {
-			var v = parseInt(get(sec, opt, String(def)), 10);
-			return isNaN(v) ? def : v;
+		var dnsPort = function(opt, def) {
+			var value = String(get('dns', opt, def));
+			return /^\d+$/.test(value) ? Number(value) : NaN;
 		};
+		var localType = get('dns', 'local_type', 'udp');
 		var mtuRaw = uci.get('singsing', 'tun', 'mtu');
 		var mtu = (mtuRaw && /^\d+$/.test(String(mtuRaw).trim())) ? parseInt(mtuRaw, 10) : null;
 		var exRaw = uci.get('singsing', 'tun', 'route_exclude_address');
@@ -229,13 +231,13 @@ function readOpenWrtSettings(lanIps) {
 
 		return {
 			dns: {
-				localType: get('dns', 'local_type', 'udp'),
+				localType: localType,
 				localServer: get('dns', 'local_server', ''),
-				localPort: num('dns', 'local_port', 53),
+				localPort: dnsPort('local_port', engine.defaultPortForDnsType(localType)),
 				localServerName: get('dns', 'local_server_name', ''),
 				localPath: get('dns', 'local_path', '/dns-query'),
 				listenAddress: get('dns', 'listen_address', '127.0.0.1'),
-				listenPort: num('dns', 'listen_port', 5335),
+				listenPort: dnsPort('listen_port', 5335),
 				hijack: bool('dns', 'hijack', true),
 				dnsmasqManage: bool('dns', 'dnsmasq_manage', true)
 			},
@@ -267,14 +269,15 @@ function loadActiveProfile() {
 		var engine = res[0];
 		var name = uci.get('singsing', 'main', 'active_profile') || 'default';
 		return callGetProfile(name).then(function(pRes) {
-			if (pRes && pRes.exists && pRes.profile) {
-				try {
-					return { name: name, profile: engine.normalizeProfile(pRes.profile), engine: engine };
-				} catch (e) {
-					return { name: name, profile: engine.blueprintProfile(), engine: engine, corruptedError: String(e) };
-				}
+			if (!pRes || pRes.ok !== true)
+				throw new Error('读取配置方案「' + name + '」失败：' + ((pRes && pRes.error) || 'RPC 未返回有效结果'));
+			if (pRes.exists === false)
+				return { name: name, profile: engine.blueprintProfile(), engine: engine };
+			try {
+				return { name: name, profile: engine.normalizeProfile(pRes.profile), engine: engine };
+			} catch (e) {
+				throw new Error('配置方案「' + name + '」损坏：' + e.message);
 			}
-			return { name: name, profile: engine.blueprintProfile(), engine: engine };
 		});
 	});
 }
@@ -336,7 +339,11 @@ function applyUciIfChanged() {
 		return uci.changes();
 	}).then(function(changes) {
 		if (changes && changes.singsing && Object.keys(changes.singsing).length > 0) {
-			return callCommitUci().then(function() {
+			return callCommitUci().catch(function(err) {
+				throw new Error('提交 UCI 设置失败：' + err.message);
+			}).then(function(res) {
+				if (!res || res.ok !== true)
+					throw new Error('提交 UCI 设置失败：' + ((res && (res.error || res.output)) || 'UCI 未确认提交'));
 				return reloadUciSingsing();
 			});
 		}
@@ -391,15 +398,24 @@ function clashCloseAllConnections() {
 	return callClashApi('DELETE', '/connections', '');
 }
 
+function stopDisabledService(st) {
+	if (!st || (!st.running && !st.dnsmasq_taken_over)) return Promise.resolve({ ok: true });
+	return callServiceAction('stop').catch(function(err) {
+		return { ok: false, output: err.message };
+	});
+}
+
 function applyWithNotify() {
 	return Promise.all([reloadUciSingsing(), callStatus()]).then(function(res) {
 		var st = res[1] || {};
 		var enabled = uci.get('singsing', 'main', 'enabled') === '1';
 		if (!enabled) {
-			var stopPromise = (st.running || st.dnsmasq_taken_over)
-				? callServiceAction('stop').catch(function() { return null; })
-				: Promise.resolve();
-			return stopPromise.then(function() {
+			return stopDisabledService(st).then(function(res) {
+				if (!res || res.ok !== true) {
+					var detail = (res && (res.error || res.output)) || '服务未确认停止';
+					ui.addNotification('停止服务失败', E('p', detail), 'danger');
+					return { ok: false, output: '停止服务失败：' + detail };
+				}
 				ui.addNotification(null, E('p', '配置已保存（当前「启用服务」未开启，未下载规则集且未启动 sing-box）'), 'info');
 				return { ok: true, skipped_start: true };
 			});
@@ -421,6 +437,7 @@ function applyWithNotify() {
 		}).catch(function(err) {
 			ui.hideModal();
 			ui.addNotification('应用配置异常', E('p', String(err)), 'danger');
+			return { ok: false, output: String(err) };
 		});
 	});
 }
@@ -467,6 +484,7 @@ return baseclass.extend({
 	loadActiveProfile: loadActiveProfile,
 	buildCurrentConfig: buildCurrentConfig,
 	generateAndApply: generateAndApply,
+	stopDisabledService: stopDisabledService,
 	applyWithNotify: applyWithNotify,
 	applyUciIfChanged: applyUciIfChanged
 });

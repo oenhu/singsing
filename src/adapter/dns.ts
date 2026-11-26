@@ -78,7 +78,7 @@ export function adaptDns(config: Json, settings: OpenWrtSettings): void {
         );
         const existingRegex = Array.isArray(rest.domain_regex) ? (rest.domain_regex as string[]) : [];
         const domain_regex = existingRegex.includes("^[^.]+$") ? existingRegex : [...existingRegex, "^[^.]+$"];
-        adaptedRules.push({ ...rest, domain, domain_regex, action: "predefined", rcode: "NXDOMAIN" });
+        adaptedRules.unshift({ ...rest, domain, domain_regex, action: "predefined", rcode: "NXDOMAIN" });
         continue;
       }
 

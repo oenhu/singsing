@@ -79,7 +79,7 @@ export async function click(root: Element, label: string) {
 }
 
 type Reply = Record<string, unknown>;
-type UciValues = Record<string, Record<string, string>>;
+type UciValues = Record<string, Record<string, string | null>>;
 type RpcHandler = (params: Reply) => Reply | Promise<Reply>;
 
 export type ApplyReply = {
@@ -138,7 +138,7 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
     },
   };
 
-  function setOption(values: UciValues, section: string, option: string, value: string) {
+  function setOption(values: UciValues, section: string, option: string, value: string | null) {
     (values[section] ??= {})[option] = value;
   }
 
@@ -149,6 +149,10 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
     set: (_package: string, section: string, option: string, value: string) => {
       setOption(cache, section, option, value);
       setOption(pending, section, option, value);
+    },
+    unset: (_package: string, section: string, option: string) => {
+      setOption(cache, section, option, null);
+      setOption(pending, section, option, null);
     },
     save: async () => {
       for (const [section, entries] of Object.entries(pending)) {
@@ -210,6 +214,7 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
     name: string;
     default?: string;
     cfgvalue?(section: string): string;
+    formvalue(): string | null | undefined;
     write?(section: string, value: string): void;
     value(): void;
     depends(): void;
@@ -222,7 +227,10 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
 
     section(_kind: unknown, section: string) {
       const option = (_type: unknown, name: string) => {
-        const entry: Option = { section, name, value() {}, depends() {} };
+        const entry: Option = {
+          section, name, value() {}, depends() {},
+          formvalue: () => this.edits.get(entry) ?? uci.get("singsing", section, name),
+        };
         this.options.set(`${section}.${name}`, entry);
         return entry;
       };

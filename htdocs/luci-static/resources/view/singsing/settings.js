@@ -41,7 +41,7 @@ return view.extend({
 		o.value('GFWList', 'GFWList（仅 GFWList 与自定义代理走代理）');
 		o.value('Non-CN', 'Non-CN（国内域名/IP 直连，其余走代理，保留并行 DNS 竞速）');
 		o.value('Global', 'Global（除局域网等必要例外外全部走代理）');
-		o.value('Direct', 'Direct（全部普通流量直连）');
+		o.value('Direct', 'Direct（未命中自定义规则的流量直连）');
 		o.cfgvalue = function() {
 			return (profile && profile.settings && profile.settings.defaultMode) || 'GFWList';
 		};
@@ -54,7 +54,7 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
-		o = s.option(form.Flag, 'auto_rollback', '启动失败自动回滚', '新配置启动或健康检查失败时自动恢复上一次有效配置并保护 dnsmasq');
+		o = s.option(form.Flag, 'auto_rollback', '启动失败后恢复原服务', '始终保留上一次有效配置。启用后，应用失败时还会恢复先前正在运行的服务。');
 		o.default = '1';
 		o.rmempty = false;
 
@@ -87,21 +87,31 @@ return view.extend({
 		s.tab('local', '本地 DNS 与 dnsmasq 协调');
 		s.tab('remote', '代理上游 DNS');
 
+		var savedDnsType = uci.get('singsing', 'dns', 'local_type') || 'udp';
+		var savedDnsPort = uci.get('singsing', 'dns', 'local_port');
+		var localPortOption;
 		o = s.taboption('direct', form.ListValue, 'local_type', 'DNS 协议');
 		o.value('udp', 'UDP');
 		o.value('tcp', 'TCP');
 		o.value('tls', 'DoT (TLS)');
 		o.value('https', 'DoH (HTTPS)');
 		o.default = 'udp';
+		o.write = function(section_id, value) {
+			uci.set('singsing', section_id, 'local_type', value);
+			if (value !== savedDnsType && savedDnsPort === String(engine.defaultPortForDnsType(savedDnsType)) &&
+				localPortOption.formvalue(section_id) === savedDnsPort) {
+				uci.unset('singsing', section_id, 'local_port');
+			}
+		};
 
 		o = s.taboption('direct', form.Value, 'local_server', '上游 DNS 地址（必填）',
 			'不使用 WAN 自动 DNS；仅支持 IPv4/IPv6（不可填域名或 127.0.0.1 / 路由器 LAN IP）。参考：阿里 223.5.5.5、DNSPod 119.29.29.29、114 114.114.114.114、Cloudflare 1.1.1.1、Google 8.8.8.8。');
 		o.placeholder = '例如 223.5.5.5';
 		o.rmempty = false;
 
-		o = s.taboption('direct', form.Value, 'local_port', '上游 DNS 端口', 'UDP / TCP 标准端口为 53，DoT 为 853，DoH 为 443');
+		o = localPortOption = s.taboption('direct', form.Value, 'local_port', '上游 DNS 端口', '留空使用协议默认端口：UDP / TCP 为 53，DoT 为 853，DoH 为 443。');
 		o.datatype = 'port';
-		o.default = '53';
+		o.placeholder = '协议默认端口';
 
 		o = s.taboption('direct', form.Value, 'local_server_name', 'TLS Server Name (SNI)', '仅 DoT / DoH 协议需要填写，例如 dns.alidns.com');
 		o.depends('local_type', 'tls');
@@ -408,14 +418,15 @@ return view.extend({
 	_persistAll: function() {
 		var self = this;
 		if (!this._map) return Promise.resolve();
-		return this._map.save().then(function() {
-			return Promise.all([
-				api.applyUciIfChanged(),
-				api.saveProfile(self._loaded.name, self._profile)
-			]);
+		return this._map.save().catch(function(err) {
+			throw new Error('保存表单设置失败：' + (err.message || String(err)));
+		}).then(function() {
+			return api.applyUciIfChanged();
+		}).then(function() {
+			return api.saveProfile(self._loaded.name, self._profile);
 		}).then(function(res) {
-			if (!res[1] || !res[1].ok)
-				throw new Error((res[1] && res[1].error) || '保存 Profile 失败');
+			if (!res || !res.ok)
+				throw new Error('保存配置方案失败：' + ((res && res.error) || 'RPC 未确认保存'));
 			return res;
 		});
 	},

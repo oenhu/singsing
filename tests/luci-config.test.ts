@@ -258,22 +258,19 @@ describe("LuCI configuration round trips", () => {
   });
 });
 
-// Keep these assertions executable on the test-only commit. Turn each into a
-// regular test in the commit that fixes it. Set the flag to see the baseline failures.
-const pendingFix = process.env.SINGSING_VERIFY_UNFIXED === "1" ? it : it.fails;
-
 describe("MVP regression cases", () => {
-  pendingFix("does not continue Save & Apply after commit_uci returned ok:false", async () => {
+  it("does not continue Save & Apply after commit_uci returned ok:false", async () => {
     const h = luci(profile());
     h.override("commit_uci", () => ({ ok: false, error: "UCI write failed" }));
     const { view, form } = await h.view("settings");
     form!.edit("dns.local_server", "9.9.9.9");
     await expect(view.handleSaveApply()).rejects.toThrow(/UCI|提交/);
     expect(h.calls.map(({ method }) => method)).not.toContain("apply_config");
+    expect(h.calls.map(({ method }) => method)).not.toContain("save_profile");
     expect(h.notifications.some(({ message }) => message.includes("成功应用"))).toBe(false);
   });
 
-  pendingFix.each(["{ truncated", "{\"version\":2}"])("surfaces a corrupt stored profile without substituting a template: %s", async (raw) => {
+  it.each(["", "{ truncated", "{\"version\":2}"])("surfaces a corrupt stored profile without substituting a template: %s", async (raw) => {
     const h = luci(profile());
     h.profiles.set(h.active, raw);
     await expect(h.view("nodes").then(() => "page accepted a damaged profile")).rejects.toThrow(/Profile|配置方案|损坏|Corrupted/i);
@@ -281,7 +278,7 @@ describe("MVP regression cases", () => {
     expect(h.profiles.get(h.active)).toBe(raw);
   });
 
-  pendingFix("reports a failed stop when saving a disabled configuration", async () => {
+  it("reports a failed stop when saving a disabled configuration", async () => {
     const h = luci(profile(), { enabled: "0" });
     h.status.running = true;
     h.status.dnsmasq_taken_over = true;
@@ -293,7 +290,7 @@ describe("MVP regression cases", () => {
     expect(h.calls.map(({ method }) => method)).not.toContain("apply_config");
   });
 
-  pendingFix.each([
+  it.each([
     { previous: "missing port", port: null },
     { previous: "old UDP default", port: "53" },
   ])("uses 853 when switching to DoT from $previous", async ({ port }) => {
@@ -310,7 +307,7 @@ describe("MVP regression cases", () => {
     }));
   });
 
-  pendingFix.each(["local_port", "listen_port"])("rejects a malformed DNS port read from UCI: %s", async (field) => {
+  it.each(["local_port", "listen_port"])("rejects a malformed DNS port read from UCI: %s", async (field) => {
     const h = luci(profile(), { dns: { [field]: field === "listen_port" ? "5335oops" : "53oops" } });
     const result = await (await h.view("settings")).view.handleSaveApply();
     expect(result).toMatchObject({ ok: false });
@@ -318,7 +315,7 @@ describe("MVP regression cases", () => {
     expect(h.calls.map(({ method }) => method)).not.toContain("apply_config");
   });
 
-  pendingFix("protects local DNS names before explicit local and remote DNS routing rules", async () => {
+  it("protects local DNS names before explicit local and remote DNS routing rules", async () => {
     const p = profile();
     p.settings.dnsRules = [
       newDnsRule({ server: "remote", lines: ["domain:nas.lan", "domain:printer.home.arpa", "domain:split.example"] }),
@@ -336,7 +333,7 @@ describe("MVP regression cases", () => {
     }
   });
 
-  pendingFix("updates a tag-based node detour when a referenced node is renamed", async () => {
+  it("updates a tag-based node detour when a referenced node is renamed", async () => {
     const p = profile();
     p.nodes.push(newNode({ id: "detoured-node", tag: "detoured", body: JSON.stringify({
       ...JSON.parse(nodeBody), detour: "existing",
@@ -353,20 +350,34 @@ describe("MVP regression cases", () => {
     ]));
   });
 
-  pendingFix("places explicit proxy rules before the Direct mode fallback", async () => {
+  it("does not delete a node still needed by another node's detour", async () => {
+    const p = profile();
+    p.nodes.push(newNode({ tag: "detoured", body: JSON.stringify({ ...JSON.parse(nodeBody), detour: "existing" }) }));
+    const h = luci(p);
+    const page = await h.view("nodes");
+    await click(row(page.root, "existing"), "删除");
+    expect((await h.api.loadActiveProfile()).profile.nodes.map((n) => n.tag)).toContain("existing");
+    expect(page.root.textContent).toMatch(/detoured.*detour|detour.*detoured/);
+  });
+
+  it("places explicit proxy rules before the Direct mode fallback", async () => {
     const p = profile();
     p.settings.defaultMode = "Direct";
     const h = luci(p);
     await addRoute(h, (await h.view("routing")).root, "proxy", "domain:proxy-first.example");
     await (await h.view("routing")).view.handleSaveApply();
-    const rules: Rule[] = applied(h).config.route.rules;
+    const { config } = applied(h);
+    const rules: Rule[] = config.route.rules;
     const explicit = rules.findIndex((r) => r.domain?.includes("proxy-first.example") && r.outbound === "proxy");
     const fallback = rules.findIndex((r) => r.clash_mode === "Direct" && r.outbound === "direct");
     expect(explicit).toBeGreaterThanOrEqual(0);
     expect(fallback).toBeGreaterThan(explicit);
+    expect(walk(config.dns.rules, {
+      domain: "proxy-first.example", mode: "Direct", qtype: "A", ruleDomain: true,
+    }).final).toBe("route:remote");
   });
 
-  pendingFix("round trips Reject in the route editor and emits native ordered actions", async () => {
+  it("round trips Reject in the route editor and emits native ordered actions", async () => {
     const h = luci(profile());
     const { root } = await h.view("routing");
     await addRoute(h, root, "proxy", "domain:overlap.example");
