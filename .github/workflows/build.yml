@@ -64,16 +64,20 @@ jobs:
 
   package-openwrt:
     needs: test-and-verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: openwrt-24.10-ipk
-            base_url: https://downloads.openwrt.org/releases/24.10.0/targets/x86/64
+            base_url: https://downloads.openwrt.org/releases/24.10.8/targets/x86/64
+            sdk: openwrt-sdk-24.10.8-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            sha256: ac4a0405d2eea821b06f93c14ba13ffa90ad0457648903df7dde02570027ab21
             ext: ipk
-          - name: openwrt-snapshot-apk
-            base_url: https://downloads.openwrt.org/snapshots/targets/x86/64
+          - name: openwrt-25.12-apk
+            base_url: https://downloads.openwrt.org/releases/25.12.6/targets/x86/64
+            sdk: openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            sha256: 1864152619092e781fa36a401960c8e9ae42d6a364c44ee5f0b197ca5f3c0fcc
             ext: apk
     steps:
       - uses: actions/checkout@v4
@@ -92,16 +96,15 @@ jobs:
       - name: Download and extract OpenWrt SDK
         run: |
           mkdir -p /tmp/sdk
-          SDK_FILE="$(curl -fsSL "${{ matrix.base_url }}/sha256sums" | awk '{gsub(/^\*/, "", $2); if ($2 ~ /^openwrt-sdk-.*\.tar\.zst$/) { print $2; exit }}')"
-          test -n "$SDK_FILE"
-          echo "Downloading ${SDK_FILE} from ${{ matrix.base_url }}..."
-          curl -fsSL "${{ matrix.base_url }}/${SDK_FILE}" | tar --zstd -xf - --strip-components=1 -C /tmp/sdk
+          curl -fsSL --retry 3 "${{ matrix.base_url }}/${{ matrix.sdk }}" -o /tmp/openwrt-sdk.tar.zst
+          echo "${{ matrix.sha256 }}  /tmp/openwrt-sdk.tar.zst" | sha256sum --check
+          tar --zstd -xf /tmp/openwrt-sdk.tar.zst --strip-components=1 -C /tmp/sdk
+          rm /tmp/openwrt-sdk.tar.zst
 
       - name: Prepare feeds and package source
         run: |
           cd /tmp/sdk
           ./scripts/feeds update luci
-          ./scripts/feeds install -a -p luci
           mkdir -p package/luci-app-singsing
           rsync -a \
             --exclude='.git' \
@@ -115,9 +118,10 @@ jobs:
         run: |
           cd /tmp/sdk
           make defconfig
-          make package/luci-app-singsing/compile V=s
+          # Package the checked JS and scripts using the SDK without rebuilding runtime dependencies.
+          make -C package/luci-app-singsing TOPDIR="$PWD" CONFIG_LUCI_JSMIN= V=s compile
           mkdir -p "${{ github.workspace }}/release-artifacts"
-          find bin/packages -type f \( -name 'luci-app-singsing*.ipk' -o -name 'luci-app-singsing*.apk' \) \
+          find bin/packages -type f -name 'luci-app-singsing*.${{ matrix.ext }}' \
             -exec cp -v {} "${{ github.workspace }}/release-artifacts/" \;
           ls -lh "${{ github.workspace }}/release-artifacts/"
 
@@ -125,7 +129,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: release-artifacts/*
+          path: release-artifacts/*.${{ matrix.ext }}
+          if-no-files-found: error
 
   release:
     needs: package-openwrt

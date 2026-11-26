@@ -353,9 +353,9 @@ download_file() {
 }
 
 read_safe_manifest() {
-	local ruleset_dir
+	local manifest="${1:-$MANIFEST_FILE}" ruleset_dir
 	ruleset_dir="$(uci_get "main.ruleset_dir" "/etc/sing-box/rule-sets")"
-	MANIFEST_PATH="$MANIFEST_FILE" RULESET_DIR="$ruleset_dir" ucode -e '
+	MANIFEST_PATH="$manifest" RULESET_DIR="$ruleset_dir" ucode -e '
 		import { readfile } from "fs";
 		let dir = replace(getenv("RULESET_DIR") || "/etc/sing-box/rule-sets", /\/+$/, "");
 		if (substr(dir, 0, 1) != "/" || index(dir, "..") >= 0) exit(1);
@@ -376,11 +376,12 @@ read_safe_manifest() {
 }
 
 ensure_rulesets() {
-	[ -f "$MANIFEST_FILE" ] || return 0
+	local manifest="${1:-$MANIFEST_FILE}"
+	[ -f "$manifest" ] || return 0
 	ensure_dirs
 
 	local lines tag url format path
-	lines="$(read_safe_manifest)"
+	lines="$(read_safe_manifest "$manifest")"
 	[ -z "$lines" ] && return 0
 
 	printf '%s\n' "$lines" | while IFS='	' read -r tag url format path; do
@@ -520,6 +521,7 @@ wait_dns_ready() {
 }
 
 apply_config() {
+	local candidate="${1:-$TMP_NEW_CONFIG}" candidate_manifest="${2:-}"
 	ensure_dirs
 	(
 		flock -x -n 9 || {
@@ -527,12 +529,14 @@ apply_config() {
 			exit 1
 		}
 
-		trap 'rm -f "$TX_FILE"' EXIT INT TERM
+		local staged_config="" staged_manifest="" had_config=0
+		trap 'rm -f "$TX_FILE" "$staged_config" "$staged_manifest"' EXIT
+		trap 'exit 1' INT TERM
 
 		local enabled_flag local_dns auto_rollback err_out
 		enabled_flag="$(uci_get "main.enabled" "0")"
 		if [ "$enabled_flag" != "1" ]; then
-			rm -f "$TMP_NEW_CONFIG"
+			[ "$candidate" != "$TMP_NEW_CONFIG" ] || rm -f "$TMP_NEW_CONFIG"
 			if [ -n "$(get_service_pid)" ]; then
 				/etc/init.d/singsing stop >/dev/null 2>&1 || true
 			fi
@@ -546,61 +550,68 @@ apply_config() {
 			exit 1
 		fi
 
-		if [ ! -s "$TMP_NEW_CONFIG" ]; then
-			printf 'Candidate config not found: %s\n' "$TMP_NEW_CONFIG" >&2
+		if [ ! -s "$candidate" ]; then
+			printf 'Candidate config not found: %s\n' "$candidate" >&2
 			exit 1
 		fi
 
 		echo "applying" > "$TX_FILE"
 
 		# 1. Ensure local rule-sets exist (auto-download missing ones)
-		if ! err_out="$(ensure_rulesets 2>&1)"; then
+		if ! err_out="$(ensure_rulesets "${candidate_manifest:-$MANIFEST_FILE}" 2>&1)"; then
 			printf '%s\n' "$err_out" >&2
 			exit 1
 		fi
 
 		# 2. Validate candidate config with sing-box check
-		if ! err_out="$(validate_config "$TMP_NEW_CONFIG" 2>&1)"; then
+		if ! err_out="$(validate_config "$candidate" 2>&1)"; then
 			printf 'Config check failed:\n%s\n' "$err_out" >&2
 			exit 1
 		fi
 
+		# Stage on the persistent filesystem so publishing uses a rename.
+		umask 077
+		staged_config="$(mktemp "$CONF_DIR/.config.XXXXXX")" &&
+			cp "$candidate" "$staged_config" || exit 1
+		if [ -n "$candidate_manifest" ]; then
+			staged_manifest="$(mktemp "$CONF_DIR/.manifest.XXXXXX")" &&
+				cp "$candidate_manifest" "$staged_manifest" || exit 1
+		fi
+
 		# 3. Backup current good config
 		if [ -s "$SB_CONFIG" ]; then
-			cp -f "$SB_CONFIG" "$SB_LAST_GOOD"
-			chmod 600 "$SB_LAST_GOOD" 2>/dev/null || true
+			cp -f "$SB_CONFIG" "$SB_LAST_GOOD" || exit 1
+			had_config=1
 		fi
 
 		# 4. Atomically install new config and ensure stock sing-box init does not collide
+		mv -f "$staged_config" "$SB_CONFIG" || exit 1
+		[ "$candidate" != "$TMP_NEW_CONFIG" ] || rm -f "$TMP_NEW_CONFIG"
 		disable_stock_singbox >/dev/null 2>&1 || true
-		mv -f "$TMP_NEW_CONFIG" "$SB_CONFIG"
-		chmod 600 "$SB_CONFIG" 2>/dev/null || true
 
-		# 5. Restart service (skip duplicate rule-set/check/wait inside init.d)
-		SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1
-
-		# 6. Health check
-		if wait_dns_ready 10; then
-			dnsmasq_takeover
-			exit 0
+		# 5. Restart and publish the matching manifest after the health check.
+		if SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1 &&
+			wait_dns_ready 10 && dnsmasq_takeover; then
+			if [ -z "$staged_manifest" ] || mv -f "$staged_manifest" "$MANIFEST_FILE"; then
+				exit 0
+			fi
 		fi
 
-		# 7. Auto rollback on startup failure
+		# 6. Auto rollback on startup failure
 		auto_rollback="$(uci_get "main.auto_rollback" "1")"
-		if [ "$auto_rollback" = "1" ] && [ -s "$SB_LAST_GOOD" ]; then
-			cp -f "$SB_LAST_GOOD" "$SB_CONFIG"
-			chmod 600 "$SB_CONFIG" 2>/dev/null || true
-			SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1
-			if wait_dns_ready 8; then
-				dnsmasq_takeover
-				printf 'New config failed to start; rolled back to last good config\n' >&2
-				exit 2
-			fi
+		if [ "$auto_rollback" = "1" ] && [ "$had_config" -eq 1 ] &&
+			cp "$SB_LAST_GOOD" "$staged_config" &&
+			mv -f "$staged_config" "$SB_CONFIG" &&
+			SINGSING_FROM_APPLY=1 /etc/init.d/singsing restart >/dev/null 2>&1 &&
+			wait_dns_ready 8 && dnsmasq_takeover; then
+			printf 'New config failed to start; rolled back to last good config\n' >&2
+			exit 2
 		fi
 
 		# Complete failure: restore dnsmasq so router retains internet access
 		dnsmasq_restore
 		/etc/init.d/singsing stop >/dev/null 2>&1 || true
+		[ "$had_config" -ne 0 ] || rm -f "$SB_CONFIG"
 		printf 'sing-box failed to start; dnsmasq restored for safety\n' >&2
 		exit 1
 	) 9>"$LOCK_FILE"
@@ -704,7 +715,7 @@ case "${1:-}" in
 	reload_if_running)      reload_if_running ;;
 	validate_config)        validate_config "${2:-$TMP_NEW_CONFIG}" ;;
 	wait_dns_ready)         wait_dns_ready "${2:-10}" ;;
-	apply_config)           apply_config ;;
+	apply_config)           apply_config "${2:-}" "${3:-}" ;;
 	cron_sync)              cron_sync ;;
 	cron_remove)            cron_remove ;;
 	*)

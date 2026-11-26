@@ -1,6 +1,6 @@
 'use strict';
 
-import { readfile, writefile, stat, unlink, rename, popen, lsdir, chmod, mkdir } from 'fs';
+import { readfile, writefile, stat, unlink, rename, popen, lsdir, chmod, mkdir, mkdtemp, rmdir } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_DIR = '/etc/singsing';
@@ -11,7 +11,6 @@ const SUBS_FILE = `${CONF_DIR}/subscriptions.json`;
 const ACCESS_FILE = `${CONF_DIR}/access-control.json`;
 const DNSMASQ_BACKUP = `${CONF_DIR}/dnsmasq-backup.json`;
 const SB_CONFIG = `${CONF_DIR}/sing-box.json`;
-const TMP_NEW_CONFIG = '/tmp/singsing/config.new.json';
 const SERVICE_MGR = '/usr/share/singsing/service-manager.sh';
 const SUB_UPDATER = '/usr/share/singsing/subscription-updater.uc';
 const INIT_SCRIPT = '/etc/init.d/singsing';
@@ -480,25 +479,35 @@ const methods = {
 			if (type(req.args.config) != 'string' || type(safeJson(req.args.config)) != 'object')
 				return { ok: false, error: 'Missing or invalid config JSON' };
 			let c = getUci();
-			runCmd(`${SERVICE_MGR} ensure_dirs`);
-
+			let manifest = null;
 			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
-				let cleanManifest = sanitizeManifest(req.args.manifest, c);
-				if (!cleanManifest)
+				manifest = sanitizeManifest(req.args.manifest, c);
+				if (manifest == null)
 					return { ok: false, error: 'Invalid rule-sets manifest' };
-				if (!writeFileSafe(MANIFEST_FILE, sprintf('%.2J', cleanManifest), 0600))
-					return { ok: false, error: 'Failed to write rule-sets manifest' };
 			}
 
-			if (!writeFileSafe(TMP_NEW_CONFIG, req.args.config, 0600))
-				return { ok: false, error: 'Failed to write candidate config' };
-
-			let res = runCmd(`${SERVICE_MGR} apply_config`);
-			return {
-				ok: res.code == 0,
-				rolled_back: res.code == 2,
-				output: res.output
-			};
+			let workDir = mkdtemp('/tmp/singsing-apply.XXXXXX');
+			if (!workDir)
+				return { ok: false, error: 'Failed to create candidate directory' };
+			let configPath = `${workDir}/config.json`;
+			let manifestPath = `${workDir}/manifest.json`;
+			let response;
+			try {
+				if (!writeFileSafe(configPath, req.args.config, 0600))
+					response = { ok: false, error: 'Failed to write candidate config' };
+				else if (manifest != null && !writeFileSafe(manifestPath, sprintf('%.2J', manifest), 0600))
+					response = { ok: false, error: 'Failed to write candidate rule-set manifest' };
+				else {
+					let res = runCmd(`${SERVICE_MGR} apply_config ${shellQuote(configPath)} ${shellQuote(manifest != null ? manifestPath : '')}`);
+					response = { ok: res.code == 0, rolled_back: res.code == 2, output: res.output };
+				}
+			} catch (e) {
+				response = { ok: false, error: 'Failed to apply candidate config' };
+			}
+			unlink(configPath);
+			unlink(manifestPath);
+			rmdir(workDir);
+			return response;
 		}
 	},
 
@@ -639,7 +648,7 @@ const methods = {
 			let n = int(req.args.lines || 200);
 			if (n < 10) n = 10;
 			if (n > 2000) n = 2000;
-			let res = runCmd(`logread -e "sing-box|singsing" 2>/dev/null | tail -n ${n}`);
+			let res = runCmd(`logread 2>/dev/null | grep -E ' (sing-box|singsing)(\\[|:)' | tail -n ${n}`);
 			return { ok: true, logs: res.output };
 		}
 	},
