@@ -117,6 +117,15 @@ export function serviceApplyFixture() {
         },
       });
     },
+    write(overrides: Record<string, string> = {}) {
+      return spawnSync("sh", [manager, "write_config", candidate, candidateManifest], {
+        encoding: "utf8", timeout: 10_000,
+        env: {
+          ...process.env, MOCK_BOX: mockBox, MOCK_RUNNING: running,
+          MOCK_DROP_IN: dropIn, MOCK_EVENTS: events, MOCK_CONFIG: config, MOCK_DATA_DIR: join(dir, "data"), ...overrides,
+        },
+      });
+    },
     dispose() { rmSync(dir, { recursive: true, force: true }); },
   };
 }

@@ -280,6 +280,73 @@ function getClashApiConfig() {
 	};
 }
 
+function validateConfigJson(rawConfig) {
+	if (type(rawConfig) != 'string') return { ok: false, error: 'Missing config JSON' };
+	let cfg = safeJson(rawConfig);
+	if (type(cfg) != 'object')
+		return { ok: false, output: '无效的 JSON 配置内容' };
+
+	let c = getUci();
+	let bin = getSingboxBin(c);
+	runCmd(`${SERVICE_MGR} ensure_dirs`);
+
+	let seqId = `${time()}.${++tmpSeq}`;
+	let tmpPath = `/tmp/singsing/validate.${seqId}.json`;
+	let stubDir = `/tmp/singsing/validate-rs.${seqId}`;
+	let missingTags = [];
+
+	// Provide temporary stubs for local rule-sets not yet downloaded so pre-flight syntax check works offline
+	if (type(cfg.route?.rule_set) == 'array') {
+		let needBinaryStub = false;
+		for (let rs in cfg.route.rule_set) {
+			if (type(rs) == 'object' && rs.type == 'local' && type(rs.path) == 'string') {
+				let st = stat(rs.path);
+				if (!st || st.size == 0) {
+					push(missingTags, '' + (rs.tag || rs.path));
+					if (rs.format != 'source') needBinaryStub = true;
+				}
+			}
+		}
+		if (length(missingTags) > 0) {
+			mkdir(stubDir, 0700);
+			let stubJson = `${stubDir}/stub.json`;
+			let stubSrs = `${stubDir}/stub.srs`;
+			writefile(stubJson, '{"version":3,"rules":[{"domain_suffix":["example.invalid"]}]}');
+			if (needBinaryStub && stat(bin)) {
+				runCmd(`${shellQuote(bin)} rule-set compile ${shellQuote(stubJson)} -o ${shellQuote(stubSrs)}`);
+			}
+			for (let rs in cfg.route.rule_set) {
+				if (type(rs) == 'object' && rs.type == 'local' && type(rs.path) == 'string') {
+					let st = stat(rs.path);
+					if (!st || st.size == 0) {
+						rs.path = (rs.format == 'source') ? stubJson : stubSrs;
+					}
+				}
+			}
+		}
+	}
+
+	let toWrite = length(missingTags) > 0 ? sprintf('%.2J', cfg) : rawConfig;
+	if (!writeFileSafe(tmpPath, toWrite, 0600)) {
+		if (length(missingTags) > 0) runCmd(`rm -rf ${shellQuote(stubDir)}`);
+		return { ok: false, error: 'Failed to write temporary config' };
+	}
+
+	let res = runCmd(`${SERVICE_MGR} validate_config ${shellQuote(tmpPath)}`);
+	unlink(tmpPath);
+	if (length(missingTags) > 0) runCmd(`rm -rf ${shellQuote(stubDir)}`);
+
+	let note = '';
+	if (res.code == 0 && length(missingTags) > 0) {
+		note = `（提示：本地尚缺 ${length(missingTags)} 个规则集 [${join(', ', missingTags)}]，首次启动或应用时将自动下载）`;
+	}
+	return {
+		ok: res.code == 0,
+		missing_rulesets: missingTags,
+		output: trim((res.output || '') + (note ? ('\n' + note) : ''))
+	};
+}
+
 const methods = {
 	status: {
 		call: function() {
@@ -396,70 +463,54 @@ const methods = {
 	validate_config: {
 		args: { config: 'string' },
 		call: function(req) {
-			if (type(req.args.config) != 'string') return { ok: false, error: 'Missing config JSON' };
-			let cfg = safeJson(req.args.config);
-			if (type(cfg) != 'object')
-				return { ok: false, output: '无效的 JSON 配置内容' };
+			return validateConfigJson(req.args.config);
+		}
+	},
+
+	write_config: {
+		args: { config: 'string', manifest: 'string' },
+		call: function(req) {
+			let check = validateConfigJson(req.args.config);
+			if (!check.ok)
+				return { ok: false, error: check.error || '配置校验未通过', output: check.output || '' };
 
 			let c = getUci();
-			let bin = getSingboxBin(c);
-			runCmd(`${SERVICE_MGR} ensure_dirs`);
+			let manifest = null;
+			if (type(req.args.manifest) == 'string' && length(trim(req.args.manifest)) > 0) {
+				manifest = sanitizeManifest(req.args.manifest, c);
+				if (manifest == null)
+					return { ok: false, error: 'Invalid rule-sets manifest' };
+			}
 
-			let seqId = `${time()}.${++tmpSeq}`;
-			let tmpPath = `/tmp/singsing/validate.${seqId}.json`;
-			let stubDir = `/tmp/singsing/validate-rs.${seqId}`;
-			let missingTags = [];
-
-			// Provide temporary stubs for local rule-sets not yet downloaded so pre-flight syntax check works offline
-			if (type(cfg.route?.rule_set) == 'array') {
-				let needBinaryStub = false;
-				for (let rs in cfg.route.rule_set) {
-					if (type(rs) == 'object' && rs.type == 'local' && type(rs.path) == 'string') {
-						let st = stat(rs.path);
-						if (!st || st.size == 0) {
-							push(missingTags, '' + (rs.tag || rs.path));
-							if (rs.format != 'source') needBinaryStub = true;
-						}
-					}
+			let workDirRes = runCmd("mktemp -d '/tmp/singsing-write.XXXXXX'");
+			let workDir = (workDirRes.code == 0 && length(workDirRes.output) > 0) ? workDirRes.output : null;
+			if (!workDir)
+				return { ok: false, error: 'Failed to create candidate directory' };
+			chmod(workDir, 0700);
+			let configPath = `${workDir}/config.json`;
+			let manifestPath = `${workDir}/manifest.json`;
+			let response;
+			try {
+				if (!writeFileSafe(configPath, req.args.config, 0600))
+					response = { ok: false, error: 'Failed to write candidate config' };
+				else if (manifest != null && !writeFileSafe(manifestPath, sprintf('%.2J', manifest), 0600))
+					response = { ok: false, error: 'Failed to write candidate rule-set manifest' };
+				else {
+					let res = runCmd(`${SERVICE_MGR} write_config ${shellQuote(configPath)} ${shellQuote(manifest != null ? manifestPath : '')}`);
+					response = {
+						ok: res.code == 0,
+						written_only: res.code == 0,
+						missing_rulesets: check.missing_rulesets || [],
+						output: res.code == 0 ? (check.output || '') : (res.output || '写入配置失败')
+					};
 				}
-				if (length(missingTags) > 0) {
-					mkdir(stubDir, 0700);
-					let stubJson = `${stubDir}/stub.json`;
-					let stubSrs = `${stubDir}/stub.srs`;
-					writefile(stubJson, '{"version":3,"rules":[{"domain_suffix":["example.invalid"]}]}');
-					if (needBinaryStub && stat(bin)) {
-						runCmd(`${shellQuote(bin)} rule-set compile ${shellQuote(stubJson)} -o ${shellQuote(stubSrs)}`);
-					}
-					for (let rs in cfg.route.rule_set) {
-						if (type(rs) == 'object' && rs.type == 'local' && type(rs.path) == 'string') {
-							let st = stat(rs.path);
-							if (!st || st.size == 0) {
-								rs.path = (rs.format == 'source') ? stubJson : stubSrs;
-							}
-						}
-					}
-				}
+			} catch (e) {
+				response = { ok: false, error: 'Failed to write candidate config' };
 			}
-
-			let toWrite = length(missingTags) > 0 ? sprintf('%.2J', cfg) : req.args.config;
-			if (!writeFileSafe(tmpPath, toWrite, 0600)) {
-				if (length(missingTags) > 0) runCmd(`rm -rf ${shellQuote(stubDir)}`);
-				return { ok: false, error: 'Failed to write temporary config' };
-			}
-
-			let res = runCmd(`${SERVICE_MGR} validate_config ${shellQuote(tmpPath)}`);
-			unlink(tmpPath);
-			if (length(missingTags) > 0) runCmd(`rm -rf ${shellQuote(stubDir)}`);
-
-			let note = '';
-			if (res.code == 0 && length(missingTags) > 0) {
-				note = `（提示：本地尚缺 ${length(missingTags)} 个规则集 [${join(', ', missingTags)}]，首次启动或应用时将自动下载）`;
-			}
-			return {
-				ok: res.code == 0,
-				missing_rulesets: missingTags,
-				output: trim((res.output || '') + (note ? ('\n' + note) : ''))
-			};
+			unlink(configPath);
+			unlink(manifestPath);
+			rmdir(workDir);
+			return response;
 		}
 	},
 
@@ -511,16 +562,17 @@ const methods = {
 				return { ok: false, error: 'Unsupported action' };
 
 			let c = getUci();
+			let wasEnabled = c.get('singsing', 'main', 'enabled') == '1';
 			if (act == 'start' || act == 'restart') {
 				let localDns = trim(c.get('singsing', 'dns', 'local_server') || '');
 				if (length(localDns) == 0 || runCmd(`${SERVICE_MGR} check_local_dns ${shellQuote(localDns)}`).code != 0)
 					return { ok: false, error: '必须先填写有效的直连上游 DNS IP（不可为空、域名、回环地址或路由器自身 IP）' };
-				if (c.get('singsing', 'main', 'enabled') != '1') {
+				if (!wasEnabled) {
 					c.set('singsing', 'main', 'enabled', '1');
 					if (!c.commit('singsing')) return { ok: false, error: '提交 UCI 启用状态失败' };
 				}
 			} else if (act == 'stop') {
-				if (c.get('singsing', 'main', 'enabled') != '0') {
+				if (wasEnabled) {
 					c.set('singsing', 'main', 'enabled', '0');
 					if (!c.commit('singsing')) return { ok: false, error: '提交 UCI 停用状态失败' };
 				}
@@ -529,6 +581,17 @@ const methods = {
 			let res = runCmd(`${INIT_SCRIPT} ${act}`);
 			if (res.code == 0 && act == 'stop')
 				res = runCmd(`${SERVICE_MGR} wait_service_stopped`);
+			if ((act == 'start' || act == 'restart') && (res.code != 0 || getServicePid() == 0)) {
+				if (!wasEnabled) {
+					let c2 = getUci();
+					c2.set('singsing', 'main', 'enabled', '0');
+					c2.commit('singsing');
+				}
+				return {
+					ok: false,
+					output: length(res.output) > 0 ? res.output : 'sing-box 未成功启动，请查看系统日志（logread -e singsing）'
+				};
+			}
 			return { ok: res.code == 0, output: res.output };
 		}
 	},

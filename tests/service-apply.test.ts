@@ -135,4 +135,26 @@ describe("service-manager application transaction (OpenWrt commands mocked)", ()
     expect(existsSync(f.dropIn)).toBe(false);
     expect(read(f.manifest)).toBe(activeManifest);
   });
+
+  it("writes config and manifest atomically while stopped without starting sing-box or touching dnsmasq/last-good", () => {
+    unlinkSync(f.config);
+    const result = f.write({ MOCK_ENABLED: "0" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(read(f.config)).toBe(candidate);
+    expect(read(f.manifest)).toBe('[{"tag":"candidate"}]');
+    expect(read(f.lastGood)).toBe(previous);
+    expect(existsSync(f.running)).toBe(false);
+    expect(existsSync(f.dropIn)).toBe(false);
+    expect(existsSync(f.events)).toBe(false);
+  });
+
+  it("refuses write_config while sing-box is running so live updates go through apply_config", () => {
+    startPrevious();
+    const result = f.write();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/apply_config/);
+    expect(read(f.config)).toBe(previous);
+    expect(read(f.manifest)).toBe(activeManifest);
+    expect(read(f.running)).toBe("5335");
+  });
 });

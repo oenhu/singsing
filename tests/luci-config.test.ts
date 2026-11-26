@@ -941,3 +941,79 @@ describe("LuCI Tailscale configuration", () => {
     expect(h.calls.some(({ method }) => method === "save_profile")).toBe(false);
   });
 });
+
+describe("LuCI overview generate-before-enable flow", () => {
+  it("generates and writes config while disabled without starting sing-box, then enables and starts directly via the toggle", async () => {
+    const h = luci(profile(), { enabled: "0", configExists: false });
+    const { root } = await h.view("overview");
+
+    const enableChk = find(root, "input", (el) => el.attrs.type === "checkbox");
+    expect(enableChk.checked).toBe(false);
+    expect(root.textContent).toContain("已停止（未生成配置）");
+    expect(root.elements("button").map((b) => b.textContent)).toContain("生成配置");
+
+    await click(root, "生成配置");
+    expect(h.calls.some(({ method }) => method === "write_config")).toBe(true);
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
+    expect(h.calls.some(({ method }) => method === "service_action")).toBe(false);
+    expect(h.committedOption("main", "enabled")).toBe("0");
+    expect(h.status.config_exists).toBe(true);
+    expect(root.textContent).toContain("已停止（配置已生成）");
+    expect(root.textContent).toContain("配置已生成并通过核心校验");
+
+    // Toggle "启用服务" ON -> config already exists, so it starts directly via service_action("start").
+    enableChk.checked = true;
+    await enableChk.dispatch("change");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(h.calls).toContainEqual({ method: "service_action", params: { action: "start" } });
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
+    expect(h.committedOption("main", "enabled")).toBe("1");
+    expect(root.elements("button").map((b) => b.textContent)).toContain("生成并应用");
+
+    // Toggle "启用服务" OFF -> stops cleanly.
+    enableChk.checked = false;
+    await enableChk.dispatch("change");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(h.calls).toContainEqual({ method: "service_action", params: { action: "stop" } });
+    expect(h.committedOption("main", "enabled")).toBe("0");
+    expect(root.elements("button").map((b) => b.textContent)).toContain("生成配置");
+  });
+
+  it("auto-generates and enables when clicking Start before config exists, and reverts enabled on apply failure", async () => {
+    const h = luci(profile(), { enabled: "0", configExists: false });
+    h.override("apply_config", () => ({ ok: false, output: "mock startup failure" }));
+    const { root } = await h.view("overview");
+
+    await click(root, "启动");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(true);
+    expect(h.committedOption("main", "enabled")).toBe("0");
+    expect(root.textContent).toContain("启用并启动失败");
+    expect(root.textContent).toContain("mock startup failure");
+
+    // Now let apply_config succeed and click Start again.
+    h.override("apply_config", () => {
+      h.status.config_exists = true;
+      h.status.running = true;
+      return { ok: true };
+    });
+    await click(root, "启动");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(h.committedOption("main", "enabled")).toBe("1");
+    expect(root.textContent).toContain("配置已自动生成、校验通过并成功启动");
+  });
+
+  it("uses apply_config when generating from Overview while service is already enabled", async () => {
+    const h = luci(profile(), { enabled: "1", configExists: true });
+    const { root } = await h.view("overview");
+
+    expect(root.elements("button").map((b) => b.textContent)).toContain("生成并应用");
+    await click(root, "生成并应用");
+
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(true);
+    expect(h.calls.some(({ method }) => method === "write_config")).toBe(false);
+  });
+});

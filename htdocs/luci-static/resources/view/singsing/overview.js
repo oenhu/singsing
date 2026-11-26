@@ -66,6 +66,12 @@ return view.extend({
 		var msgBox = E('div', { 'id': 'sb-action-msg', 'style': 'margin-top:12px;' });
 		var connCheckBox = E('div', { 'id': 'sb-conn-check', 'style': 'margin-top:12px;' });
 		var clashPanel = E('div', { 'id': 'sb-clash-panel', 'style': 'margin-top:16px;' });
+		var enableChk, generateBtn;
+
+		var syncControls = function(curSt) {
+			if (enableChk) enableChk.checked = !!(curSt && curSt.enabled);
+			if (generateBtn) generateBtn.textContent = (curSt && curSt.enabled) ? '生成并应用' : '生成配置';
+		};
 
 		var showMsg = function(type, title, detail) {
 			var fg = type === 'error' ? '#991b1b' : (type === 'warning' ? '#92400e' : '#166534');
@@ -87,9 +93,13 @@ return view.extend({
 			var directDns = curSt.local_dns ? (curSt.local_dns + ' (' + (curSt.local_dns_type || 'udp').toUpperCase() + ')') : '未填写（必填）';
 			var proxyNow = (liveStats.proxies && liveStats.proxies.proxy && liveStats.proxies.proxy.now) || '-';
 
+			var runText = curSt.running
+				? ('运行中 (PID ' + curSt.pid + ')')
+				: (curSt.config_exists ? '已停止（配置已生成）' : '已停止（未生成配置）');
+
 			gridContainer.innerHTML = '';
 			gridContainer.appendChild(E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:10px;margin:12px 0;' }, [
-				statCard('运行状态', curSt.running ? ('运行中 (PID ' + curSt.pid + ')') : '已停止', curSt.running ? '#16a34a' : '#dc2626'),
+				statCard('运行状态', runText, curSt.running ? '#16a34a' : '#dc2626'),
 				statCard('运行时长', curSt.running ? formatUptime(curSt.uptime) : '-'),
 				statCard('核心版本', curSt.bin_exists ? (curSt.version || curSt.singbox_bin) + (curSt.version_supported === false ? '（需 1.14+）' : '') : ('未找到: ' + curSt.singbox_bin), (curSt.bin_exists && curSt.version_supported !== false) ? null : '#dc2626'),
 				statCard('当前分流模式', mode),
@@ -250,6 +260,7 @@ return view.extend({
 			refreshing = true;
 			return api.status().then(function(newSt) {
 				st = newSt || {};
+				syncControls(st);
 				if (!st.running) {
 					liveStats.proxies = null;
 					liveStats.mode = null;
@@ -305,15 +316,76 @@ return view.extend({
 			});
 		};
 
+		var enableAndStart = function() {
+			return api.status().then(function(curSt) {
+				if (curSt && curSt.config_exists) {
+					return runService('start', '启动服务');
+				}
+				ui.showModal('启用并启动服务', [E('p', { 'class': 'spinning' }, '尚未生成运行配置，正在生成、校验并启动 sing-box...')]);
+				return api.buildCurrentConfig().then(function(ctx) {
+					var errors = ctx.result.issues.filter(function(i) { return i.level === 'error'; });
+					if (errors.length > 0) {
+						ui.hideModal();
+						var lines = errors.map(function(e) { return '• ' + e.message; }).join('\n');
+						showMsg('error', '配置校验未通过，未能启用服务', lines);
+						return refreshAll(true);
+					}
+					uci.unload('singsing');
+					return uci.load('singsing').then(function() {
+						uci.set('singsing', 'main', 'enabled', '1');
+						return api.applyUciIfChanged();
+					}).then(function() {
+						return api.applyConfig(
+							JSON.stringify(ctx.result.config, null, 2),
+							JSON.stringify(ctx.result.ruleSets, null, 2)
+						);
+					}).then(function(res) {
+						ui.hideModal();
+						if (res && res.ok) {
+							var warnText = ctx.result.issues.filter(function(i) { return i.level === 'warning'; })
+								.map(function(w) { return '• ' + w.message; }).join('\n');
+							showMsg('success', '配置已自动生成、校验通过并成功启动', warnText ? ('警告：\n' + warnText) : '');
+							return refreshAll(true);
+						}
+						uci.unload('singsing');
+						return uci.load('singsing').then(function() {
+							uci.set('singsing', 'main', 'enabled', '0');
+							return api.applyUciIfChanged().catch(function() {});
+						}).then(function() {
+							showMsg('error', '启用并启动失败', (res && (res.error || res.output)) || '未知错误');
+							return refreshAll(true);
+						});
+					});
+				}).catch(function(err) {
+					ui.hideModal();
+					showMsg('error', '启用并启动异常', String(err));
+					return refreshAll(true);
+				});
+			});
+		};
+
 		var runGenerateAndApply = function() {
 			return api.status().then(function(curSt) {
 				if (!curSt || !curSt.enabled) {
-					return api.stopDisabledService(curSt).then(function(res) {
-						if (res && res.ok)
-							showMsg('warning', '当前「启用服务」处于关闭状态，未下载规则集且未启动 sing-box', '如需启动服务，请前往「基本设置」开启「启用服务」后保存并应用。');
-						else
-							showMsg('error', '停止服务失败', (res && (res.error || res.output)) || '服务未确认停止');
+					ui.showModal('生成配置', [E('p', { 'class': 'spinning' }, '正在生成并校验 sing-box 配置（当前未启用，仅写入配置不启动服务）...')]);
+					return api.generateAndWrite().then(function(res) {
+						ui.hideModal();
+						if (res && res.validationErrors && res.validationErrors.length) {
+							var lines = res.validationErrors.map(function(e) { return '• ' + e.message; }).join('\n');
+							showMsg('error', '配置校验未通过，未写入配置', lines);
+						} else if (res && res.ok) {
+							var parts = [];
+							if (res.output) parts.push(res.output);
+							if (res.warnings && res.warnings.length)
+								parts.push('警告：\n' + res.warnings.map(function(w) { return '• ' + w.message; }).join('\n'));
+							showMsg('success', '配置已生成并通过核心校验（已写入 /etc/singsing/sing-box.json，可随时开启「启用服务」或点击「启动」）', parts.join('\n'));
+						} else {
+							showMsg('error', '生成或写入配置失败', (res && (res.output || res.error)) || '未知错误');
+						}
 						return refreshAll(true);
+					}).catch(function(err) {
+						ui.hideModal();
+						showMsg('error', '生成配置异常', String(err));
 					});
 				}
 				ui.showModal('生成并应用配置', [E('p', { 'class': 'spinning' }, '正在校验、补全本地规则集并重启 sing-box...')]);
@@ -381,16 +453,27 @@ return view.extend({
 			});
 		};
 
+		enableChk = E('input', {
+			'type': 'checkbox',
+			'checked': st.enabled ? 'checked' : null,
+			'change': function() {
+				if (enableChk.checked) enableAndStart();
+				else runService('stop', '停用并停止服务');
+			}
+		});
+		generateBtn = E('button', { 'class': 'btn cbi-button-action', 'click': runGenerateAndApply }, st.enabled ? '生成并应用' : '生成配置');
+
 		renderStatusGrid(st);
 		poll.add(refreshAll, 5);
 
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, 'Sing-Box 运行概览'),
-			E('div', { 'class': 'cbi-map-descr' }, '基于 riverscn/singbox-confgen 的 OpenWrt 原生管理插件：手动指定直连上游 DNS，TUN + Auto Redirect 透明代理，规则集本地化与 Clash API 实时控制。'),
+			E('div', { 'class': 'cbi-map-descr' }, '基于 riverscn/singbox-confgen 的 OpenWrt 原生管理插件：支持先生成校验配置再切换启用状态，手动指定直连上游 DNS，TUN + Auto Redirect 透明代理与 Clash API 实时控制。'),
 			gridContainer,
-			E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;' }, [
-				E('button', { 'class': 'btn cbi-button-action', 'click': runGenerateAndApply }, '生成并应用'),
-				E('button', { 'class': 'btn cbi-button-apply', 'click': function() { runService('start', '启动服务'); } }, '启动'),
+			E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;' }, [
+				E('label', { 'style': 'display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--border-color-medium, rgba(127,127,127,0.3));border-radius:4px;font-weight:600;cursor:pointer;' }, [enableChk, '启用服务']),
+				generateBtn,
+				E('button', { 'class': 'btn cbi-button-apply', 'click': enableAndStart }, '启动'),
 				E('button', { 'class': 'btn cbi-button-reset', 'click': function() { runService('stop', '停止服务'); } }, '停止'),
 				E('button', { 'class': 'btn cbi-button-neutral', 'click': function() { runService('restart', '重启服务'); } }, '重启'),
 				E('button', { 'class': 'btn', 'click': showPreview }, '预览配置 JSON'),

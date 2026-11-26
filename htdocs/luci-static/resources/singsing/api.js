@@ -51,6 +51,13 @@ var callValidateConfig = rpc.declare({
 	expect: {}
 });
 
+var callWriteConfig = rpc.declare({
+	object: 'luci.singsing',
+	method: 'write_config',
+	params: ['config', 'manifest'],
+	expect: {}
+});
+
 var callApplyConfig = rpc.declare({
 	object: 'luci.singsing',
 	method: 'apply_config',
@@ -284,6 +291,27 @@ function buildCurrentConfig() {
 	});
 }
 
+function generateAndWrite() {
+	return buildCurrentConfig().then(function(ctx) {
+		var errors = ctx.result.issues.filter(function(i) { return i.level === 'error'; });
+		if (errors.length > 0) {
+			return {
+				ok: false,
+				validationErrors: errors,
+				warnings: ctx.result.issues.filter(function(i) { return i.level === 'warning'; })
+			};
+		}
+		return callWriteConfig(
+			JSON.stringify(ctx.result.config, null, 2),
+			JSON.stringify(ctx.result.ruleSets, null, 2)
+		).then(function(writeRes) {
+			return Object.assign({}, writeRes, {
+				warnings: ctx.result.issues.filter(function(i) { return i.level === 'warning'; })
+			});
+		});
+	});
+}
+
 function generateAndApply() {
 	return buildCurrentConfig().then(function(ctx) {
 		var errors = ctx.result.issues.filter(function(i) { return i.level === 'error'; });
@@ -427,6 +455,7 @@ return baseclass.extend({
 	deleteProfile: callDeleteProfile,
 	switchActiveProfile: switchActiveProfile,
 	validateConfig: callValidateConfig,
+	writeConfig: callWriteConfig,
 	applyConfig: callApplyConfig,
 	serviceAction: callServiceAction,
 	dnsCheck: callDnsCheck,
@@ -454,6 +483,7 @@ return baseclass.extend({
 	readOpenWrtSettings: readOpenWrtSettings,
 	loadActiveProfile: loadActiveProfile,
 	buildCurrentConfig: buildCurrentConfig,
+	generateAndWrite: generateAndWrite,
 	generateAndApply: generateAndApply,
 	stopDisabledService: stopDisabledService,
 	applyWithNotify: applyWithNotify,

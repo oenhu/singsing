@@ -93,6 +93,7 @@ export type ApplyReply = {
 
 type Api = {
   buildCurrentConfig(): Promise<{ profile: Profile; settings: engine.OpenWrtSettings; result: engine.OpenWrtGenerateResult }>;
+  generateAndWrite(): Promise<ApplyReply & { written_only?: boolean; missing_rulesets?: string[] }>;
   generateAndApply(): Promise<ApplyReply>;
   applyWithNotify(): Promise<ApplyReply | undefined>;
   loadActiveProfile(): Promise<{ name: string; profile: Profile }>;
@@ -115,7 +116,7 @@ function loadModule<T>(name: string, globals: Record<string, unknown>): T {
   return new Function(...Object.keys(globals), source)(...Object.values(globals)) as T;
 }
 
-export function luci(profile: Profile, options: { enabled?: string; dns?: Record<string, string> } = {}) {
+export function luci(profile: Profile, options: { enabled?: string; configExists?: boolean; dns?: Record<string, string> } = {}) {
   const active = "mvp-test";
   const profiles = new Map([[active, JSON.stringify(profile)]]);
   const calls: { method: string; params: Reply }[] = [];
@@ -128,7 +129,13 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
   let staged: UciValues = {};
   let pending: UciValues = {};
   let cache: UciValues = {};
-  const status = { running: false, tun_up: false, dnsmasq_taken_over: false, lan_ips: ["192.168.21.1"] };
+  const status = {
+    running: false,
+    tun_up: false,
+    dnsmasq_taken_over: false,
+    config_exists: options.configExists ?? false,
+    lan_ips: ["192.168.21.1"],
+  };
   let access = { mode: "all", clients: [], deviceRules: [] };
   let modal: Element | undefined;
 
@@ -194,7 +201,7 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
       staged = {};
       return 0;
     },
-    status: () => status,
+    status: () => ({ enabled: committed.main?.enabled === "1", ...status }),
     get_ruleset_urls: () => ({ urls: {} }),
     get_access_control: () => ({ access_control: access }),
     save_access_control: ({ data }) => {
@@ -202,8 +209,25 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
       return { ok: true };
     },
     get_lan_clients: () => ({ clients: [] }),
-    apply_config: () => ({ ok: true }),
-    service_action: () => ({ ok: true }),
+    write_config: () => {
+      status.config_exists = true;
+      return { ok: true, written_only: true, missing_rulesets: [], output: "" };
+    },
+    apply_config: () => {
+      status.config_exists = true;
+      return { ok: true };
+    },
+    service_action: ({ action }) => {
+      if (action === "start" || action === "restart") {
+        setOption(committed, "main", "enabled", "1");
+        status.running = true;
+      } else if (action === "stop") {
+        setOption(committed, "main", "enabled", "0");
+        status.running = false;
+      }
+      return { ok: true };
+    },
+    clash_api: () => ({ ok: false }),
   };
 
   const rpc = {
@@ -295,9 +319,9 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
       if (!modal) throw new Error("No open LuCI modal");
       return modal;
     },
-    async view(name: "nodes" | "settings" | "routing" | "groups" | "tailscale") {
+    async view(name: "overview" | "nodes" | "settings" | "routing" | "groups" | "tailscale") {
       const view = loadModule<View & { _map?: FormMap }>(`view/singsing/${name}.js`, {
-        view: extend, api, form: { Map: FormMap }, uci, ui, window, E,
+        view: extend, api, form: { Map: FormMap }, poll: { add() {}, remove() {} }, uci, ui, window, E,
       });
       const root = await view.render(await view.load());
       return { view, root, form: view._map };

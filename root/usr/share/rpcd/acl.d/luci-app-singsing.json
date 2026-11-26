@@ -27,6 +27,7 @@
 					"save_profile",
 					"delete_profile",
 					"validate_config",
+					"write_config",
 					"apply_config",
 					"service_action",
 					"ruleset_update",

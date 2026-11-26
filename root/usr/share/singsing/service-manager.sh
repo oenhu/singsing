@@ -727,6 +727,54 @@ apply_config() {
 	) 9>"$LOCK_FILE"
 }
 
+write_config() {
+	local candidate="${1:-$TMP_NEW_CONFIG}" candidate_manifest="${2:-}"
+	ensure_dirs
+	(
+		flock -x -n 9 || {
+			printf 'Another apply operation is already in progress\n' >&2
+			exit 1
+		}
+
+		local staged_config="" staged_manifest="" local_dns
+		trap 'rm -f "$staged_config" "$staged_manifest"' EXIT
+		trap 'exit 1' INT TERM
+
+		if [ -n "$(get_service_pid)" ]; then
+			printf 'sing-box is currently running; use apply_config to update a live service\n' >&2
+			exit 1
+		fi
+
+		local_dns="$(uci_get "dns.local_server" "")"
+		if ! check_local_dns "$local_dns"; then
+			printf 'Valid direct upstream DNS IP (dns.local_server) is required before writing config\n' >&2
+			exit 1
+		fi
+
+		if [ ! -s "$candidate" ]; then
+			printf 'Candidate config not found: %s\n' "$candidate" >&2
+			exit 1
+		fi
+
+		umask 077
+		staged_config="$(mktemp "$CONF_DIR/.config.XXXXXX")" &&
+			cp "$candidate" "$staged_config" || exit 1
+		if [ -n "$candidate_manifest" ]; then
+			staged_manifest="$(mktemp "$CONF_DIR/.manifest.XXXXXX")" &&
+				cp "$candidate_manifest" "$staged_manifest" || exit 1
+		fi
+
+		mv -f "$staged_config" "$SB_CONFIG" || exit 1
+		staged_config=""
+		[ "$candidate" != "$TMP_NEW_CONFIG" ] || rm -f "$TMP_NEW_CONFIG"
+		if [ -n "$staged_manifest" ]; then
+			mv -f "$staged_manifest" "$MANIFEST_FILE" || exit 1
+			staged_manifest=""
+		fi
+		exit 0
+	) 9>"$LOCK_FILE"
+}
+
 case "${1:-}" in
 	ensure_dirs)            ensure_dirs ;;
 	disable_stock_singbox)  disable_stock_singbox ;;
@@ -739,9 +787,10 @@ case "${1:-}" in
 	validate_config)        validate_config "${2:-$TMP_NEW_CONFIG}" ;;
 	wait_dns_ready)         wait_dns_ready "${2:-10}" ;;
 	wait_service_stopped)   wait_service_stopped ;;
+	write_config)           write_config "${2:-}" "${3:-}" ;;
 	apply_config)           apply_config "${2:-}" "${3:-}" ;;
 	*)
-		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|reload_if_running|validate_config|wait_dns_ready|apply_config}\n' "$0" >&2
+		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|reload_if_running|validate_config|wait_dns_ready|write_config|apply_config}\n' "$0" >&2
 		exit 1
 		;;
 esac
