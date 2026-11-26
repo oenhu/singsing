@@ -7,6 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:sing-box": "SINGSING_VERIFY_CORE=1 vitest run tests/sing-box.test.ts",
     "build:engine": "node scripts/build-engine.mjs",
     "build": "npm run typecheck && npm run build:engine"
   },

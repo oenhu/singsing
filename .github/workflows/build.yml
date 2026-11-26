@@ -31,6 +31,15 @@ jobs:
       - name: Run unit and sing-box 1.14.3 schema tests
         run: npm test
 
+      - name: Execute sing-box 1.14.4 on generated configs
+        run: |
+          archive="sing-box-1.14.4-linux-amd64"
+          mkdir -p "$RUNNER_TEMP/sing-box"
+          curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/$archive.tar.gz" -o "$RUNNER_TEMP/sing-box/core.tar.gz"
+          echo "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  $RUNNER_TEMP/sing-box/core.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/sing-box/core.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/sing-box"
+          SINGSING_SING_BOX="$RUNNER_TEMP/sing-box/sing-box" npm run test:sing-box
+
       - name: Verify shell, JSON, and LuCI JS syntax
         run: |
           sh -n root/usr/share/singsing/service-manager.sh
