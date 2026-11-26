@@ -134,6 +134,12 @@ jobs:
             -exec cp -v {} "${{ github.workspace }}/release-artifacts/" \;
           ls -lh "${{ github.workspace }}/release-artifacts/"
 
+      - name: Verify package dependencies, hooks and payload
+        run: |
+          for artifact in release-artifacts/*.${{ matrix.ext }}; do
+            sh scripts/verify-openwrt-package.sh "$artifact" /tmp/sdk/staging_dir/host/bin/apk
+          done
+
       - name: Upload OpenWrt package artifact
         uses: actions/upload-artifact@v4
         with:
