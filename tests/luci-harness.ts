@@ -295,7 +295,7 @@ export function luci(profile: Profile, options: { enabled?: string; dns?: Record
       if (!modal) throw new Error("No open LuCI modal");
       return modal;
     },
-    async view(name: "nodes" | "settings" | "routing" | "groups") {
+    async view(name: "nodes" | "settings" | "routing" | "groups" | "tailscale") {
       const view = loadModule<View & { _map?: FormMap }>(`view/singsing/${name}.js`, {
         view: extend, api, form: { Map: FormMap }, uci, ui, window, E,
       });

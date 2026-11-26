@@ -4,8 +4,9 @@ import { join, resolve } from "node:path";
 import Ajv2020 from "ajv/dist/2020";
 import type { ValidateFunction } from "ajv";
 import { describe, expect, it } from "vitest";
-import { blueprintProfile, defaultOpenWrtSettings, generateOpenWrtConfig, newDnsRule, newNode, newRule } from "../src/adapter/index";
+import { blueprintProfile, defaultOpenWrtSettings, generateOpenWrtConfig, newDnsRule, newGroup, newNode, newRule, newTailnet } from "../src/adapter/index";
 import type { OpenWrtAccessControl } from "../src/adapter/index";
+import type { Profile } from "../src/upstream/types";
 import { serviceApplyFixture } from "./service-apply-harness";
 
 const binary = process.env.SINGSING_SING_BOX ? resolve(process.env.SINGSING_SING_BOX) : "sing-box";
@@ -17,7 +18,12 @@ function run(...args: string[]) {
   });
 }
 
-function generatedConfig(dir: string, mode: "GFWList" | "Direct" = "Direct", accessControl?: OpenWrtAccessControl) {
+function generatedConfig(
+  dir: string,
+  mode: "GFWList" | "Direct" = "Direct",
+  accessControl?: OpenWrtAccessControl,
+  customize?: (p: Profile) => void,
+) {
   const p = blueprintProfile();
   const node = newNode({
     tag: "mvp-vless",
@@ -36,6 +42,7 @@ function generatedConfig(dir: string, mode: "GFWList" | "Direct" = "Direct", acc
     newRule({ outbound: "proxy", lines: ["domain:proxy.example"] }),
     newRule({ outbound: "direct", lines: ["domain:direct.example"], ruleSets: [{ source: "geosite-netflix", content: "domain" }] }),
   ];
+  customize?.(p);
   const settings = defaultOpenWrtSettings();
   settings.dns.localServer = "223.5.5.5";
   settings.dns.localType = "tls";
@@ -43,6 +50,7 @@ function generatedConfig(dir: string, mode: "GFWList" | "Direct" = "Direct", acc
   settings.dns.localServerName = "dns.alidns.com";
   settings.paths.cacheFile = join(dir, "cache.db");
   settings.paths.ruleSetDir = dir;
+  settings.paths.tailscaleStateRoot = join(dir, "tailscale");
   settings.accessControl = accessControl;
   const generated = generateOpenWrtConfig(p, settings);
   expect(generated.issues.filter(({ level }) => level === "error")).toEqual([]);
@@ -99,6 +107,144 @@ describe.skipIf(process.env.SINGSING_VERIFY_CORE !== "1")("sing-box 1.14.4 binar
           },
         ],
       });
+      writeLocalRuleSets(f.dir, ruleSets);
+      writeCheckedJSON(f.config, config);
+      expect(() => run("check", "-c", f.config)).not.toThrow();
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it("accepts 1.14.4 native Tailscale and Headscale endpoints, MagicDNS, and proxy group selectors", () => {
+    const f = serviceApplyFixture();
+    try {
+      const { config, ruleSets } = generatedConfig(
+        f.dir,
+        "GFWList",
+        {
+          mode: "all",
+          clients: [],
+          deviceRules: [
+            {
+              id: "tailnet-device",
+              name: "Lab client via Headscale",
+              clients: ["192.0.2.55"],
+              outbound: "hs-lab",
+              enabled: true,
+            },
+          ],
+        },
+        (p) => {
+          const official = newTailnet({
+            id: "ts-official-id",
+            tag: "ts-official",
+            magicDns: true,
+            acceptDefaultResolvers: true,
+            asProxy: true,
+            exitNode: "office-gw",
+            routes: ["corp.internal", "10.42.0.0/16"],
+            endpoint: JSON.stringify({
+              state_directory: "tailscale-official",
+              hostname: "openwrt-router",
+              auth_key: "tskey-auth-synthetic-1144-a",
+              accept_routes: true,
+              advertise_routes: ["192.168.21.0/24", "2001:db8:21::/64"],
+              exit_node_allow_lan_access: true,
+              advertise_tags: ["tag:router"],
+              listen_port: 41641,
+              udp_timeout: "5m",
+            }),
+          });
+          const headscale = newTailnet({
+            id: "ts-headscale-id",
+            tag: "hs-lab",
+            magicDns: true,
+            acceptDefaultResolvers: false,
+            asProxy: false,
+            exitNode: "",
+            routes: ["10.99.0.0/16"],
+            endpoint: JSON.stringify({
+              state_directory: "tailscale-headscale",
+              hostname: "openwrt-hs",
+              control_url: "https://headscale.example.test",
+              auth_key: "tskey-auth-synthetic-1144-b",
+              accept_routes: false,
+              advertise_exit_node: true,
+              ephemeral: true,
+            }),
+          });
+          p.settings.tailnets = [official, headscale];
+          p.groups = [newGroup({ id: "ts-group-id", tag: "ts-group", members: [official.id] })];
+          p.settings.proxyDefault = official.id;
+          p.settings.dnsRules.push(
+            newDnsRule({ server: "tailnet", tailnet: official.id, lines: ["domain:intranet.example"] }),
+          );
+        },
+      );
+
+      const typed = config as {
+        endpoints: Record<string, unknown>[];
+        dns: { servers: Record<string, unknown>[]; rules: Record<string, unknown>[] };
+        outbounds: Record<string, unknown>[];
+        route: { rules: Record<string, unknown>[] };
+      };
+      expect(typed.endpoints).toEqual([
+        expect.objectContaining({
+          type: "tailscale",
+          tag: "ts-official",
+          state_directory: join(f.dir, "tailscale", "tailscale-official"),
+          exit_node: "office-gw",
+          advertise_routes: ["192.168.21.0/24", "2001:db8:21::/64"],
+          listen_port: 41641,
+          udp_timeout: "5m",
+        }),
+        expect.objectContaining({
+          type: "tailscale",
+          tag: "hs-lab",
+          control_url: "https://headscale.example.test",
+          state_directory: join(f.dir, "tailscale", "tailscale-headscale"),
+          accept_routes: false,
+          advertise_exit_node: true,
+          ephemeral: true,
+        }),
+      ]);
+      expect(typed.dns.servers).toEqual(expect.arrayContaining([
+        {
+          type: "tailscale",
+          tag: "ts-official-dns",
+          endpoint: "ts-official",
+          accept_default_resolvers: true,
+          accept_search_domain: true,
+        },
+        {
+          type: "tailscale",
+          tag: "hs-lab-dns",
+          endpoint: "hs-lab",
+          accept_search_domain: true,
+        },
+      ]));
+      expect(typed.dns.rules).toEqual(expect.arrayContaining([
+        { preferred_by: "ts-official-dns", action: "route", server: "ts-official-dns" },
+        { preferred_by: "hs-lab-dns", action: "route", server: "hs-lab-dns" },
+        { domain: ["intranet.example"], action: "route", server: "ts-official-dns" },
+      ]));
+      expect(typed.route.rules).toEqual(expect.arrayContaining([
+        { preferred_by: "ts-official", action: "route", outbound: "ts-official" },
+        { preferred_by: "hs-lab", action: "route", outbound: "hs-lab" },
+        { domain_suffix: ["corp.internal"], ip_cidr: ["10.42.0.0/16"], action: "route", outbound: "ts-official" },
+        { ip_cidr: ["10.99.0.0/16"], action: "route", outbound: "hs-lab" },
+        { source_ip_cidr: ["192.0.2.55/32"], action: "route", outbound: "hs-lab" },
+      ]));
+      const proxyOut = typed.outbounds.find((o) => o.tag === "proxy") as { outbounds: string[]; default: string };
+      expect(proxyOut.outbounds).toEqual(expect.arrayContaining(["ts-group", "ts-official"]));
+      expect(proxyOut.outbounds).not.toContain("hs-lab");
+      expect(proxyOut.default).toBe("ts-official");
+      expect(typed.outbounds).toContainEqual(expect.objectContaining({
+        type: "selector",
+        tag: "ts-group",
+        outbounds: ["ts-official"],
+      }));
+
       writeLocalRuleSets(f.dir, ruleSets);
       writeCheckedJSON(f.config, config);
       expect(() => run("check", "-c", f.config)).not.toThrow();

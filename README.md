@@ -116,6 +116,13 @@ mv -f "$temp" /etc/singsing/sing-box.json
 - 真机临时 TUN 只接管测试客户端到指定地址的流量。现有 UCI、DHCP 与防火墙配置保持一致。当前环境用一台客户端完成了上述探测。
 - 手机或电脑启用随机 MAC 后，设备可能无法命中原 MAC 规则。可在对应网络中使用固定的私有 MAC，或用稳定 IP/CIDR 作为补充。
 
+### Tailscale 离线校验
+
+- LuCI Mock 已覆盖官方 Tailscale 与 Headscale 控制服务器切换、合成 Auth Key、多 Tailnet 互异状态目录、接收与通告子网（IPv4/IPv6 CIDR）、出口节点、代理组与默认出口集成、导入 Profile 原有 1.14 原生高级字段保留，以及无效 CIDR、非法 `control_url`、路径穿越、原始与归一化状态目录冲突、`<tag>-dns` 冲突、节点 `detour` / 设备规则 / DNS 规则引用校验。
+- 真实 `sing-box 1.14.4`（含 `with_tailscale` 编译标签）及其导出 Schema 已校验多 Tailnet（官方 + Headscale）、Tailscale DNS Server（`accept_default_resolvers` / `accept_search_domain`）、MagicDNS `preferred_by` 路由、自定义 DNS 规则、代理组与设备分流目标，且在 LibWrt 25.12-SNAPSHOT 路由器的 `1.14.4` 核心复核通过。
+- 真实 `1.14.4` 核心确认同一端点不能同时设置 `exit_node` 与 `advertise_exit_node: true`（即使 Schema 允许，核心会拒绝初始化）；当前图形表单尚未前端拦截该组合，应用前由 `sing-box check` 拒绝，后续变更待维护者确认。
+- 真实 Tailnet / Headscale 在线注册、重启状态复用、MagicDNS 与子网连通、通告批准、Exit Node 转发及日志凭据审查等待维护者提供专用测试环境后执行（当前标为待验）。
+
 ## 开发与测试
 
 ```bash

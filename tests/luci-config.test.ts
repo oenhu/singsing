@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { blueprintProfile, newDnsRule, newGroup, newNode, newRule } from "../src/adapter/index";
+import { blueprintProfile, newDnsRule, newGroup, newNode, newRule, newTailnet } from "../src/adapter/index";
 import { walk } from "./dnswalk";
 import { click, Element, find, luci } from "./luci-harness";
 
@@ -501,5 +501,409 @@ describe("MVP regression cases", () => {
     ]);
     expect(matching[2].ip_cidr).toEqual(["203.0.113.7/32", "198.51.100.32/27"]);
     expect(config.outbounds).not.toContainEqual(expect.objectContaining({ tag: "reject" }));
+  });
+});
+
+function tailnetModalControls(modal: Element) {
+  const checkbox = (labelText: string) =>
+    find(modal, "label", (el) => el.textContent.includes(labelText)).elements("input")[0];
+  return {
+    tag: modal.elements("input").filter((el) => el.attrs.type === "text")[0],
+    hostname: find(modal, "input", (el) => String(el.attrs.placeholder).includes("openwrt-router")),
+    stateDir: find(modal, "input", (el) => String(el.attrs.placeholder).includes("tailscale-home")),
+    serverMode: find(modal, "select"),
+    controlUrl: find(modal, "input", (el) => String(el.attrs.placeholder).includes("headscale.example.com")),
+    authKey: find(modal, "input", (el) => el.attrs.type === "password"),
+    magicDns: checkbox("启用 MagicDNS"),
+    acceptDefaultResolvers: checkbox("使用 Tailnet 默认 DNS"),
+    acceptRoutes: checkbox("接收子网路由"),
+    asProxy: checkbox("加入 proxy 代理选择器"),
+    advertiseExitNode: checkbox("本机作为出口节点通告"),
+    allowLanAccess: checkbox("出口节点允许访问局域网"),
+    ephemeral: checkbox("临时节点模式"),
+    exitNode: find(modal, "input", (el) => String(el.attrs.placeholder).includes("出口节点名称")),
+    advertiseRoutes: find(modal, "input", (el) => String(el.attrs.placeholder).includes("向 Tailnet 通告的本地网段")),
+    advertiseTags: find(modal, "input", (el) => String(el.attrs.placeholder).includes("ACL 标签")),
+    extraRoutes: find(modal, "textarea"),
+  };
+}
+
+describe("LuCI Tailscale configuration", () => {
+  it("round trips official and Headscale Tailnets, preserves imported native fields, and integrates with DNS, routes, and proxy groups", async () => {
+    const p = profile();
+    p.settings.tailnets = [
+      newTailnet({
+        id: "ts-official-id",
+        tag: "official-ts",
+        magicDns: false,
+        acceptDefaultResolvers: false,
+        asProxy: false,
+        exitNode: "",
+        routes: [],
+        endpoint: JSON.stringify({
+          state_directory: "tailscale-official",
+          hostname: "imported-router",
+          accept_routes: true,
+          exit_node: "stale-json-exit",
+          listen_port: 41641,
+          udp_timeout: "5m",
+        }),
+      }),
+    ];
+    const h = luci(p);
+
+    // Switch imported official Tailnet to Headscale and verify reload preserves extra native fields.
+    const initial = await h.view("tailscale");
+    await click(row(initial.root, "official-ts"), "编辑");
+    let fields = tailnetModalControls(h.modal());
+    expect(fields.serverMode.value).toBe("official");
+    fields.serverMode.value = "custom";
+    fields.serverMode.dispatch("change");
+    fields.controlUrl.value = "https://headscale.example.test";
+    await click(h.modal(), "保存 Tailnet");
+
+    const asHeadscale = await h.view("tailscale");
+    expect(row(asHeadscale.root, "official-ts").textContent).toContain("https://headscale.example.test");
+
+    // Switch back to Official Tailscale with full routing/exit-node/proxy fields and synthetic auth_key.
+    await click(row(asHeadscale.root, "official-ts"), "编辑");
+    fields = tailnetModalControls(h.modal());
+    expect(fields.serverMode.value).toBe("custom");
+    fields.serverMode.value = "official";
+    fields.serverMode.dispatch("change");
+    fields.hostname.value = "router-official";
+    fields.stateDir.value = "tailscale-official";
+    fields.authKey.value = "tskey-auth-synthetic-official-01";
+    fields.magicDns.checked = true;
+    fields.acceptDefaultResolvers.checked = true;
+    fields.acceptRoutes.checked = true;
+    fields.asProxy.checked = true;
+    fields.advertiseExitNode.checked = false;
+    fields.allowLanAccess.checked = true;
+    fields.ephemeral.checked = false;
+    fields.exitNode.value = "office-gw";
+    fields.advertiseRoutes.value = "192.168.21.0/24, 2001:db8:21::/64";
+    fields.advertiseTags.value = "tag:router, tag:openwrt";
+    fields.extraRoutes.value = "corp.internal\n10.42.0.0/16";
+    await click(h.modal(), "保存 Tailnet");
+
+    // Add a second Tailnet targeting Headscale with a distinct state_directory, advertise_exit_node, and accept_routes disabled.
+    await click(asHeadscale.root, "新增 Tailnet");
+    fields = tailnetModalControls(h.modal());
+    fields.tag.value = "hs-lab";
+    fields.hostname.value = "router-hs";
+    fields.stateDir.value = "tailscale-hs-lab";
+    fields.serverMode.value = "custom";
+    fields.serverMode.dispatch("change");
+    fields.controlUrl.value = "https://headscale.example.test";
+    fields.authKey.value = "tskey-auth-synthetic-headscale-02";
+    fields.magicDns.checked = true;
+    fields.acceptDefaultResolvers.checked = false;
+    fields.acceptRoutes.checked = false;
+    fields.asProxy.checked = false;
+    fields.advertiseExitNode.checked = true;
+    fields.ephemeral.checked = true;
+    fields.extraRoutes.value = "10.99.0.0/16";
+    await click(h.modal(), "保存 Tailnet");
+
+    const reloaded = await h.view("tailscale");
+    expect(row(reloaded.root, "official-ts").textContent).toContain("官方 Tailscale");
+    expect(row(reloaded.root, "official-ts").textContent).toContain("office-gw");
+    expect(row(reloaded.root, "official-ts").textContent).toContain("tailscale-official");
+    expect(row(reloaded.root, "hs-lab").textContent).toContain("https://headscale.example.test");
+    expect(row(reloaded.root, "hs-lab").textContent).toContain("tailscale-hs-lab");
+
+    const savedTailnets = (await h.api.loadActiveProfile()).profile.settings.tailnets;
+    const savedOfficialEp = JSON.parse(savedTailnets.find((t) => t.tag === "official-ts")!.endpoint);
+    expect(savedOfficialEp).toMatchObject({
+      state_directory: "tailscale-official",
+      hostname: "router-official",
+      auth_key: "tskey-auth-synthetic-official-01",
+      accept_routes: true,
+      advertise_routes: ["192.168.21.0/24", "2001:db8:21::/64"],
+      advertise_tags: ["tag:router", "tag:openwrt"],
+      exit_node_allow_lan_access: true,
+      listen_port: 41641,
+      udp_timeout: "5m",
+    });
+    expect(savedOfficialEp.advertise_exit_node).toBeUndefined();
+    expect(savedOfficialEp.control_url).toBeUndefined();
+    expect(savedOfficialEp.exit_node).toBeUndefined();
+
+    // Add official-ts to a custom proxy group and set it as default in proxy selector.
+    const groupsPage = await h.view("groups");
+    await click(groupsPage.root, "新增代理组");
+    const groupModal = h.modal();
+    find(groupModal, "input", (el) => el.attrs.type === "text").value = "ts-group";
+    const tsMemberChk = find(groupModal, "label", (el) => el.textContent.includes("[Tailnet] official-ts")).elements("input")[0];
+    tsMemberChk.checked = true;
+    tsMemberChk.dispatch("change");
+    await click(groupModal, "保存代理组");
+
+    const groupsReloaded = await h.view("groups");
+    const proxyDefaultSel = find(groupsReloaded.root, "select", (el) =>
+      el.elements("option").some((opt) => opt.value === "ts-official-id"));
+    expect(proxyDefaultSel.elements("option").map((opt) => opt.textContent)).not.toContain("[tailnet] hs-lab");
+    proxyDefaultSel.value = "ts-official-id";
+    await click(groupsReloaded.root, "保存出口设置");
+
+    // Add a custom DNS rule routed to official-ts MagicDNS.
+    const settingsPage = await h.view("settings");
+    await click(settingsPage.root, "新增 DNS 规则");
+    const dnsModal = h.modal();
+    const [srvSel, tsSel] = dnsModal.elements("select");
+    srvSel.value = "tailnet";
+    srvSel.dispatch("change");
+    tsSel.value = "ts-official-id";
+    find(dnsModal, "textarea", (el) => String(el.attrs.placeholder).includes("每行一个域名")).value = "domain:intranet.example";
+    await click(dnsModal, "保存");
+
+    const finalTailscale = await h.view("tailscale");
+    const preview = (await h.api.buildCurrentConfig()).result.config;
+    expect(await finalTailscale.view.handleSaveApply()).toMatchObject({ ok: true });
+    const { config } = applied(h);
+    expect(config).toEqual(preview);
+
+    expect(config.endpoints).toEqual([
+      expect.objectContaining({
+        type: "tailscale",
+        tag: "official-ts",
+        state_directory: "/etc/sing-box/tailscale/tailscale-official",
+        hostname: "router-official",
+        auth_key: "tskey-auth-synthetic-official-01",
+        accept_routes: true,
+        advertise_routes: ["192.168.21.0/24", "2001:db8:21::/64"],
+        advertise_tags: ["tag:router", "tag:openwrt"],
+        exit_node_allow_lan_access: true,
+        exit_node: "office-gw",
+        listen_port: 41641,
+        udp_timeout: "5m",
+      }),
+      expect.objectContaining({
+        type: "tailscale",
+        tag: "hs-lab",
+        control_url: "https://headscale.example.test",
+        state_directory: "/etc/sing-box/tailscale/tailscale-hs-lab",
+        hostname: "router-hs",
+        auth_key: "tskey-auth-synthetic-headscale-02",
+        accept_routes: false,
+        advertise_exit_node: true,
+        ephemeral: true,
+      }),
+    ]);
+    expect(config.endpoints[0].control_url).toBeUndefined();
+    expect(config.endpoints[1].exit_node).toBeUndefined();
+
+    expect(config.dns.servers).toEqual(expect.arrayContaining([
+      {
+        type: "tailscale",
+        tag: "official-ts-dns",
+        endpoint: "official-ts",
+        accept_default_resolvers: true,
+        accept_search_domain: true,
+      },
+      {
+        type: "tailscale",
+        tag: "hs-lab-dns",
+        endpoint: "hs-lab",
+        accept_search_domain: true,
+      },
+    ]));
+    expect(config.dns.rules).toEqual(expect.arrayContaining([
+      { preferred_by: "official-ts-dns", action: "route", server: "official-ts-dns" },
+      { preferred_by: "hs-lab-dns", action: "route", server: "hs-lab-dns" },
+    ]));
+    expect(walk(config.dns.rules, { domain: "intranet.example", mode: "GFWList", qtype: "A" }).final).toBe("route:official-ts-dns");
+
+    expect(config.route.rules).toEqual(expect.arrayContaining([
+      { preferred_by: "official-ts", action: "route", outbound: "official-ts" },
+      { preferred_by: "hs-lab", action: "route", outbound: "hs-lab" },
+      { domain_suffix: ["corp.internal"], ip_cidr: ["10.42.0.0/16"], action: "route", outbound: "official-ts" },
+      { ip_cidr: ["10.99.0.0/16"], action: "route", outbound: "hs-lab" },
+    ]));
+
+    const proxyOut = config.outbounds.find((o: { tag: string }) => o.tag === "proxy");
+    expect(proxyOut.outbounds).toEqual(expect.arrayContaining(["ts-group", "official-ts"]));
+    expect(proxyOut.outbounds).not.toContain("hs-lab");
+    expect(proxyOut.default).toBe("official-ts");
+    expect(config.outbounds).toContainEqual(expect.objectContaining({
+      type: "selector",
+      tag: "ts-group",
+      outbounds: ["official-ts"],
+    }));
+  });
+
+  it.each([
+    {
+      name: "invalid advertise_routes IPv4 without prefix",
+      setup: (f: ReturnType<typeof tailnetModalControls>) => { f.advertiseRoutes.value = "192.168.6.1"; },
+      error: /CIDR/,
+    },
+    {
+      name: "invalid advertise_routes IPv6 prefix",
+      setup: (f: ReturnType<typeof tailnetModalControls>) => { f.advertiseRoutes.value = "2001:db8::/129"; },
+      error: /CIDR/,
+    },
+    {
+      name: "invalid custom control_url scheme",
+      setup: (f: ReturnType<typeof tailnetModalControls>) => {
+        f.serverMode.value = "custom";
+        f.serverMode.dispatch("change");
+        f.controlUrl.value = "headscale.example.test";
+      },
+      error: /http:\/\/ 或 https:\/\//,
+    },
+    {
+      name: "state_directory parent traversal",
+      setup: (f: ReturnType<typeof tailnetModalControls>) => { f.stateDir.value = "../outside"; },
+      error: /\.\./,
+    },
+    {
+      name: "invalid extra route URL",
+      setup: (f: ReturnType<typeof tailnetModalControls>) => { f.extraRoutes.value = "https://bad.example/path"; },
+      error: /额外路由/,
+    },
+    {
+      name: "reserved tag dns-in",
+      setup: (f: ReturnType<typeof tailnetModalControls>) => { f.tag.value = "dns-in"; },
+      error: /系统保留/,
+    },
+    {
+      name: "duplicate tag against existing node",
+      setup: (f: ReturnType<typeof tailnetModalControls>) => { f.tag.value = "existing"; },
+      error: /已被其他/,
+    },
+  ])("rejects $name in modal before saving", async ({ setup, error }) => {
+    const h = luci(profile());
+    const { root } = await h.view("tailscale");
+    await click(root, "新增 Tailnet");
+    setup(tailnetModalControls(h.modal()));
+    await click(h.modal(), "保存 Tailnet");
+    expect(h.modal().textContent).toMatch(error);
+    expect(h.calls.some(({ method }) => method === "save_profile" || method === "apply_config")).toBe(false);
+  });
+
+  it("blocks applying when two Tailnets have duplicate or post-normalization colliding state directories", async () => {
+    const p = profile();
+    p.settings.tailnets = [
+      newTailnet({
+        id: "ts-a",
+        tag: "ts-a",
+        endpoint: JSON.stringify({ state_directory: "tailscale-shared", hostname: "r-a", accept_routes: true }),
+      }),
+    ];
+    const h = luci(p);
+    const page = await h.view("tailscale");
+
+    // 1. Identical raw state_directory
+    await click(page.root, "新增 Tailnet");
+    let fields = tailnetModalControls(h.modal());
+    fields.tag.value = "ts-b";
+    fields.stateDir.value = "tailscale-shared";
+    await click(h.modal(), "保存 Tailnet");
+    expect(page.root.textContent).toMatch(/state_directory.*重复/);
+
+    const rawCollision = await page.view.handleSaveApply();
+    expect(rawCollision).toMatchObject({ ok: false });
+    expect(rawCollision?.validationErrors?.map((e) => e.message).join(" ")).toMatch(/state_directory.*重复/);
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
+
+    // 2. Relative vs absolute path colliding after normalization under tailscale_state_root
+    await click(row(page.root, "ts-b"), "编辑");
+    fields = tailnetModalControls(h.modal());
+    fields.stateDir.value = "/etc/sing-box/tailscale/tailscale-shared";
+    await click(h.modal(), "保存 Tailnet");
+
+    const normCollision = await page.view.handleSaveApply();
+    expect(normCollision).toMatchObject({ ok: false });
+    expect(normCollision?.validationErrors?.map((e) => e.message).join(" ")).toMatch(/状态目录解析后.*冲突/);
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
+  });
+
+  it("validates Tailnet references across DNS rules, <tag>-dns collisions, node detour, and device rules", async () => {
+    // 1. Settings view rejects adding a tailnet DNS rule when no Tailnet exists.
+    const emptyH = luci(profile());
+    const emptySettings = await emptyH.view("settings");
+    await click(emptySettings.root, "新增 DNS 规则");
+    const [emptySrv] = emptyH.modal().elements("select");
+    emptySrv.value = "tailnet";
+    emptySrv.dispatch("change");
+    find(emptyH.modal(), "textarea", (el) => String(el.attrs.placeholder).includes("每行一个域名")).value = "domain:corp.example";
+    await click(emptyH.modal(), "保存");
+    expect(emptyH.modal().textContent).toContain("添加至少一个 Tailnet");
+    expect(emptyH.calls.some(({ method }) => method === "save_profile")).toBe(false);
+
+    // 2. Colliding generated <tag>-dns name blocks apply_config.
+    const pCollision = profile();
+    pCollision.nodes.push(newNode({ id: "n-dns", tag: "home-dns", body: nodeBody }));
+    pCollision.settings.tailnets = [
+      newTailnet({
+        id: "ts-home",
+        tag: "home",
+        magicDns: true,
+        endpoint: JSON.stringify({ state_directory: "tailscale-home", hostname: "router", accept_routes: true }),
+      }),
+    ];
+    const hCollision = luci(pCollision);
+    const colRes = await (await hCollision.view("tailscale")).view.handleSaveApply();
+    expect(colRes).toMatchObject({ ok: false });
+    expect(colRes?.validationErrors?.map((e) => e.message).join(" ")).toMatch(/标签重复：home-dns/);
+    expect(hCollision.calls.some(({ method }) => method === "apply_config")).toBe(false);
+
+    // 3. Deleting a Tailnet still referenced by node detour and device rule blocks apply_config;
+    //    dangling DNS rule warns and is omitted cleanly once hard errors are cleared.
+    const pRef = profile();
+    pRef.nodes.push(newNode({
+      id: "detour-node",
+      tag: "via-ts",
+      body: JSON.stringify({ ...JSON.parse(nodeBody), detour: "office" }),
+    }));
+    pRef.settings.tailnets = [
+      newTailnet({
+        id: "ts-office",
+        tag: "office",
+        magicDns: true,
+        acceptDefaultResolvers: true,
+        endpoint: JSON.stringify({ state_directory: "tailscale-office", hostname: "router", accept_routes: true }),
+      }),
+    ];
+    pRef.settings.dnsRules = [
+      newDnsRule({ server: "tailnet", tailnet: "ts-office", lines: ["domain:intranet.example"] }),
+    ];
+    const hRef = luci(pRef);
+    hRef.override("get_access_control", () => ({
+      access_control: {
+        mode: "all",
+        clients: [],
+        deviceRules: [
+          { id: "dr-ts", name: "Workstation", clients: ["192.168.21.55"], outbound: "office", enabled: true },
+        ],
+      },
+    }));
+
+    // Valid before deletion
+    const beforeDelete = await hRef.api.buildCurrentConfig();
+    expect(beforeDelete.result.issues.filter((i) => i.level === "error")).toEqual([]);
+
+    // Delete the Tailnet via UI
+    const tsPage = await hRef.view("tailscale");
+    await click(row(tsPage.root, "office"), "删除");
+    const afterDelete = await tsPage.view.handleSaveApply();
+    expect(afterDelete).toMatchObject({ ok: false });
+    const errText = afterDelete?.validationErrors?.map((e) => e.message).join(" ") ?? "";
+    expect(errText).toContain("detour 指向的「office」不存在");
+    expect(errText).toContain("指定的出口「office」不存在");
+    expect(hRef.calls.some(({ method }) => method === "apply_config")).toBe(false);
+
+    // Once detour and device rule references are removed, dangling DNS rule only warns and config applies cleanly.
+    const cleaned = (await hRef.api.loadActiveProfile()).profile;
+    cleaned.nodes = cleaned.nodes.filter((n) => n.id !== "detour-node");
+    hRef.profiles.set(hRef.active, JSON.stringify(cleaned));
+    hRef.override("get_access_control", () => ({ access_control: { mode: "all", clients: [], deviceRules: [] } }));
+    const builtAfterClean = await hRef.api.buildCurrentConfig();
+    expect(builtAfterClean.result.issues.filter((i) => i.level === "error")).toEqual([]);
+    expect(builtAfterClean.result.issues.some((i) => i.level === "warning" && i.detail.includes("选择的 tailnet 已删除"))).toBe(true);
+    const cleanedDns = builtAfterClean.result.config.dns as { servers: Record<string, unknown>[] };
+    expect(cleanedDns.servers).not.toContainEqual(expect.objectContaining({ tag: "office-dns" }));
   });
 });
