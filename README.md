@@ -89,13 +89,13 @@ mv -f "$temp" /etc/singsing/sing-box.json
 | LuCI 与 RPC | [LuCI API](htdocs/luci-static/resources/singsing/api.js) 让预览、核心校验和应用共用生成入口；[RPC](root/usr/share/rpcd/ucode/singsing.uc) 读取设置、保存 Profile、接受候选 JSON。Profile 和运行 JSON 分开存放。 | 不同操作各自读取当前设置。编辑配置后重新应用会重新生成候选；当前没有部署某次预览快照的约定。 |
 | 服务管理 | [procd 脚本](root/etc/init.d/singsing) 和 [Service Manager](root/usr/share/singsing/service-manager.sh) 管理规则集、真实核心校验、原子替换、启停、DNS 接管及恢复。RC1 在 LibWrt Snapshot 上验证重启、自启、候选拒绝和启动失败回滚；单测补充原子替换与首次启动失败清理。 | 目前先备份被替换的配置，按进程与 DNS 监听判断就绪。规划的“启动成功后记录新配置为最后有效版本”和单独 TUN 就绪检查仍需界定。 |
 | 设备分流 | [access.ts](src/adapter/access.ts) 生成原生 `source_ip_cidr`、`source_mac_address`。阶段二已补齐 LuCI 保存与重读、IPv4/IPv6/MAC、重叠规则顺序、1.14.4 核心校验与真实客户端匹配证据。 | 随机 MAC 说明已记入文档；设备策略读取失败回落与 `all` 模式旧列表边界已用隔离单测记录，是否调整待维护者确认。 |
-| Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已有多 Tailnet、官方与 Headscale 控制服务器、Auth Key、MagicDNS、接收与通告子网、使用与通告出口，导入的高级原生字段可保留。阶段三已通过 LuCI 保存重读/校验测试、1.14.4 导出 Schema 及真实 `sing-box 1.14.4`（含路由器实机核心）离线校验。 | 同一端点同时填 `exit_node` 与 `advertise_exit_node` 会被 1.14.4 核心拒绝（表单未前置拦截，应用前由 `sing-box check` 拒绝）。独立真实 Tailnet / Headscale 联调等待维护者提供测试环境；1.15 新字段留待最低版本升级。 |
+| Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已有多 Tailnet、官方与 Headscale 控制服务器、Auth Key、MagicDNS、接收与通告子网、使用与通告出口，导入的高级原生字段可保留。阶段三已完成 LuCI 表单/冲突/引用测试、1.14.4 导出 Schema、真实 `sing-box 1.14.4` 离线校验，并在专用 Headscale 环境完成真机联调（注册、无 `auth_key` 重启复用、MagicDNS FQDN、对端与通告子网互通、Exit Node 使用与通告批准、按 tag 选流及日志无凭据泄露）。 | 1) 同一端点同时填 `exit_node` 与 `advertise_exit_node` 会被 1.14.4 核心拒绝（表单未前置拦截，应用前由 `sing-box check` 拒绝）；2) 单标签 MagicDNS 主机名当前会被 OpenWrt 适配层 `^[^.]+$` 的 `NXDOMAIN` 规则先于 `preferred_by` 拦截（FQDN 正常解析）；3) 官方 Tailscale 控制面与 1.15 新字段待后续确认/升级。 |
 | 发布 | 两个正式 SDK 的 r3 包构建与校验已通过，LibWrt Snapshot 有硬件结果；阶段一至阶段四未修改任何打包运行文件，r3 包内容与 `242d10a` 一致。 | 卸载后 rpcd 注册残留、规则集下载失败诊断含完整 URL 均已按维护者决定标为「不处理」（保留既有证据与手动重载办法）。OpenWrt 24.10.8 和 25.12.6 官方固件运行仍未验证。 |
 
 ### 需要确认的现有行为
 
 - **设备规则优先级与边界。** 同一配置的生成结果显示，DNS 及内置保护、适用的直连列表和有序自定义规则可在设备规则之前命中。设备指定出口按保存顺序排列，并先于白名单或黑名单规则；设备规则整体早于默认分流模式。若让设备策略覆盖普通自定义规则，命中两者的用户流量会改道。现有“所有设备按分流策略”模式也能保存旧的无效设备列表，生成时仍报错；读取设备策略失败时，生成入口回落到 `all`。两项边界已用隔离单测记录，保持现状直至维护者确认。
-- **Tailscale 出口节点互斥约束。** 真实 `sing-box 1.14.4` 拒绝同一 Tailscale 端点同时设置 `exit_node` 与 `advertise_exit_node: true`（即使 Schema 允许）。目前应用前由 `sing-box check` 拦截，图形表单暂未前置阻止；是否增加表单与适配层校验待维护者确认。
+- **Tailscale 出口节点互斥与单标签 MagicDNS 行为。** 真实 `sing-box 1.14.4` 拒绝同一 Tailscale 端点同时设置 `exit_node` 与 `advertise_exit_node: true`（即使 Schema 允许）；目前应用前由 `sing-box check` 拦截，图形表单暂未前置阻止。此外，在真实 Headscale 联调中确认 FQDN MagicDNS（`<host>.<magicdns-domain>`）可正常经 `tailscale` DNS 解析，而无后缀单标签主机名会优先命中 `src/adapter/dns.ts` 前置的 `^[^.]+$` `NXDOMAIN` 规则。两项是否调整待维护者确认。
 - **订阅配置生成。** LuCI 订阅导入使用上游引擎。[定时订阅程序](root/usr/share/singsing/subscription-updater.uc) 自行解析部分订阅格式，并在 `patchRunningConfig` 重建节点与代理组片段，然后把候选交给 Service Manager。这是目前最明确的重复生成代码。应先对照两条路径的输出与升级行为。移除局部生成必须先解决后台自动应用的兼容性。
 - **运行备份的语义。** 现有 `last-good` 在下一次应用开始时保存当时的活动文件。要改为始终保存最近健康的配置，需要明确首次应用成功、关闭自动回滚和活动文件已损坏时的预期行为。
 
@@ -117,12 +117,16 @@ mv -f "$temp" /etc/singsing/sing-box.json
 - 真机临时 TUN 只接管测试客户端到指定地址的流量。现有 UCI、DHCP 与防火墙配置保持一致。当前环境用一台客户端完成了上述探测。
 - 手机或电脑启用随机 MAC 后，设备可能无法命中原 MAC 规则。可在对应网络中使用固定的私有 MAC，或用稳定 IP/CIDR 作为补充。
 
-### Tailscale 离线校验
+### Tailscale 与 Headscale 验证
 
 - LuCI Mock 已覆盖官方 Tailscale 与 Headscale 控制服务器切换、合成 Auth Key、多 Tailnet 互异状态目录、接收与通告子网（IPv4/IPv6 CIDR）、出口节点、代理组与默认出口集成、导入 Profile 原有 1.14 原生高级字段保留，以及无效 CIDR、非法 `control_url`、路径穿越、原始与归一化状态目录冲突、`<tag>-dns` 冲突、节点 `detour` / 设备规则 / DNS 规则引用校验。
 - 真实 `sing-box 1.14.4`（含 `with_tailscale` 编译标签）及其导出 Schema 已校验多 Tailnet（官方 + Headscale）、Tailscale DNS Server（`accept_default_resolvers` / `accept_search_domain`）、MagicDNS `preferred_by` 路由、自定义 DNS 规则、代理组与设备分流目标，且在 LibWrt 25.12-SNAPSHOT 路由器的 `1.14.4` 核心复核通过。
-- 真实 `1.14.4` 核心确认同一端点不能同时设置 `exit_node` 与 `advertise_exit_node: true`（即使 Schema 允许，核心会拒绝初始化）；当前图形表单尚未前端拦截该组合，应用前由 `sing-box check` 拒绝，后续变更待维护者确认。
-- 真实 Tailnet / Headscale 在线注册、重启状态复用、MagicDNS 与子网连通、通告批准、Exit Node 转发及日志凭据审查等待维护者提供专用测试环境后执行（当前标为待验）。
+- 在维护者提供的专用 Headscale 环境（配合 `tun.route_exclude_address` 保护局域网管理网段）下，于路由器独立状态目录 `/etc/sing-box/tailscale/live-test-hs` 完成实机闭环验证：
+  - **注册与重启复用**：首次带临时预授权密钥经真实 `service-manager.sh apply_config` 上线注册并生成 `0600` 权限的 `tailscaled.state`；移除 `auth_key` 重启至新 PID 后复用同一 Headscale 节点 ID 与 Tailscale IP，未产生重复节点。
+  - **MagicDNS 与对端/子网互通**：Debian 局域网客户端经路由器 DNS 解析对端 FQDN MagicDNS 成功并 `ping` 通对端 IP 与 FQDN（0% 丢包）；路由器通告独立测试子网 `198.51.100.0/24` 经 Headscale 批准后，对端节点 `ping` 通该通告子网（0% 丢包）。无后缀单标签主机名受 `src/adapter/dns.ts` 的 `^[^.]+$` 保护规则优先拦截返回 `NXDOMAIN`。
+  - **Exit Node 与按 tag 选流**：直连对照请求返回路由器 WAN 出口 IP；按 Tailscale tag 分流的 HTTP 请求经在线 Exit Node 出口返回对端公网 IP，核心日志确认命中 `endpoint/tailscale[hs-live]`；独立配置 `advertise_exit_node: true` 后 Headscale 收到 `0.0.0.0/0` 与 `::/0` 并批准生效。
+  - **凭据脱敏与现场还原**：全量 `logread` 核对临时预授权密钥及控制面 API 密钥出现次数均为 `0`；验证结束后已删除临时 Headscale 节点并使临时密钥过期，路由器停服还原备份，UCI、DHCP、防火墙与活动配置 SHA-256 全部一致。
+- 官方 Tailscale 控制面实机联调与 1.15 新增字段仍标为待验/后续版本事项。
 
 ## 开发与测试
 
@@ -165,7 +169,7 @@ MVP 完成后的整机重启、自启、IPv6、升级、安全及卸载复测记
 | 语法与静态检查 | POSIX `sh -n`、JSON 解析与 LuCI JS 语法检查 | 4 个 Shell 脚本、3 个 JSON 与 13 个 LuCI JS 文件全部通过。 |
 | sing-box 1.14.4（Linux ARM64） | `SINGSING_SING_BOX=/path/to/sing-box npm run test:sing-box` | 7 项全部通过（1.14.4 版本、Direct/GFWList、设备白/黑名单、官方+Headscale Tailscale Endpoint/MagicDNS/代理组、缺失规则集失败保护）。 |
 | OpenWrt 正式 SDK（r3） | `git diff 242d10a -- root/ htdocs/ src/ Makefile` 核对 | 阶段一至阶段四未修改打包运行文件，已验 r3 `.ipk` / `.apk` 产物内容保持一致。 |
-| LibWrt 25.12-SNAPSHOT 真机与 Debian | 非破坏性核对 r3 实装文件、`ash`/`ucode` 语法、1.14.4 `with_tailscale` 核心离线 `check` 及设备分流实测 | 9/9 核心运行文件 SHA-256 与仓库一致，Tailscale 配置通过路由器 `sing-box check`，服务保持停用无残留，Debian 链路正常；真实 Tailnet 联调与官方 24.10.8 / 25.12.6 固件运行待验。 |
+| LibWrt 25.12-SNAPSHOT 真机与 Debian | 非破坏性核对 r3 实装文件、`ash`/`ucode` 语法、1.14.4 `with_tailscale` 核心离线 `check`、设备分流与专用 Headscale 真机联调 | 9/9 核心运行文件 SHA-256 与仓库一致；Headscale 注册、去 `auth_key` 重启复用、MagicDNS FQDN、对端与通告子网互通、Exit Node 使用/通告批准、按 tag 选流与日志零凭据泄露均通过；还原后校验和一致，服务停用无残留，Debian 链路正常；官方 Tailscale 控制面与官方 24.10.8 / 25.12.6 固件运行待验。 |
 
 ## 致谢
 
