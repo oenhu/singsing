@@ -78,6 +78,36 @@ mv -f "$temp" /etc/singsing/sing-box.json
 
 如果最后有效文件缺失，从升级前的备份恢复并重新执行核心校验。
 
+## 架构与规划对照
+
+审计基线为 GitHub `main` 的 `242d10a`。实现、自动化校验和真机运行分别记录。部署与升级证据见 [RC1 真机验收](docs/rc1-validation.md)。
+
+| 模块 | 当前职责与证据 | 规划差距 |
+| --- | --- | --- |
+| 配置生成 | [upstream](src/upstream) 管理 Profile、节点、代理组、DNS、路由和原生 Tailscale Endpoint。常规 LuCI 生成通过 [adapter](src/adapter/config.ts) 调用上游。 | 定时订阅另有局部配置生成路径，见下文。 |
+| OpenWrt 适配 | [adapter](src/adapter) 调整 TUN、dnsmasq 对接用 DNS 入站、设备规则、本地规则集、缓存及状态目录。RC1 已验证原生 TUN、Auto Redirect、DNS 与 IPv4/IPv6 域名和地址分流。 | 设备来源地址、MAC 匹配及优先级缺少完整 1.14.4 和真机证据。 |
+| LuCI 与 RPC | [LuCI API](htdocs/luci-static/resources/singsing/api.js) 让预览、核心校验和应用共用生成入口；[RPC](root/usr/share/rpcd/ucode/singsing.uc) 读取设置、保存 Profile、接受候选 JSON。Profile 和运行 JSON 分开存放。 | 不同操作各自读取当前设置。编辑配置后重新应用会重新生成候选；当前没有部署某次预览快照的约定。 |
+| 服务管理 | [procd 脚本](root/etc/init.d/singsing) 和 [Service Manager](root/usr/share/singsing/service-manager.sh) 管理规则集、真实核心校验、原子替换、启停、DNS 接管及恢复。RC1 在 LibWrt Snapshot 上验证重启、自启、候选拒绝和启动失败回滚。 | 目前先备份被替换的配置，按进程与 DNS 监听判断就绪。规划的“启动成功后记录新配置为最后有效版本”和单独 TUN 就绪检查仍需界定。 |
+| 设备分流 | [access.ts](src/adapter/access.ts) 生成原生 `source_ip_cidr`、`source_mac_address`。白名单、黑名单、指定出口与 DHCP 租约及邻居表选择已有代码，部分规则形态通过单测。 | 需要补齐页面保存与重读、IPv6、重叠规则顺序、核心校验与实体匹配证据。界面应说明随机 MAC 会影响匹配。 |
+| Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已有多 Tailnet、官方与 Headscale 控制服务器、Auth Key、MagicDNS、接收与通告子网、使用与通告出口及高级 JSON。相对状态路径由适配层持久化。现有测试包含 1.14.3 Schema 样例。 | 仍需 1.14.4 原生校验和独立真实 Tailnet 验证，覆盖状态持久、认证日志、MagicDNS、子网及出口。1.15 新字段留待最低版本升级。 |
+| 发布 | 两个正式 SDK 的包构建已通过，LibWrt Snapshot 有硬件结果。 | 卸载后 rpcd 注册残留、规则集下载失败诊断含完整 URL，均在 RC1 复现。OpenWrt 24.10.8 和 25.12.6 官方固件运行仍未验证。 |
+
+### 需要确认的现有行为
+
+- **设备规则优先级。** 同一配置的生成结果显示，DNS 及内置保护、适用的直连列表和有序自定义规则可在设备规则之前命中。设备指定出口按保存顺序排列，并先于白名单或黑名单规则；设备规则整体早于默认分流模式。若让设备策略覆盖普通自定义规则，命中两者的用户流量会改道。现有“所有设备按分流策略”模式也能保存旧的无效设备列表，生成时仍报错；读取设备策略失败时，生成入口可能回落到 `all`。这些边界先测试与确认。
+- **订阅配置生成。** LuCI 订阅导入使用上游引擎。[定时订阅程序](root/usr/share/singsing/subscription-updater.uc) 自行解析部分订阅格式，并在 `patchRunningConfig` 重建节点与代理组片段，然后把候选交给 Service Manager。这是目前最明确的重复生成代码。应先对照两条路径的输出与升级行为。移除局部生成必须先解决后台自动应用的兼容性。
+- **运行备份的语义。** 现有 `last-good` 在下一次应用开始时保存当时的活动文件。要改为始终保存最近健康的配置，需要明确首次应用成功、关闭自动回滚和活动文件已损坏时的预期行为。
+
+在生产代码中未发现自建的代理协议、DNS 解析器、设备探测守护进程或 nftables 转发引擎。节点测速选择交由 sing-box 原生代理组，设备 MAC 匹配交由原生邻居解析，现有定时订阅使用 OpenWrt cron。字段和版本依据见 [sing-box 路由规则](https://sing-box.sagernet.org/configuration/route/rule/)、[邻居解析](https://sing-box.sagernet.org/configuration/shared/neighbor/)与 [Tailscale Endpoint](https://sing-box.sagernet.org/configuration/endpoint/tailscale/)。
+
+### 最小实施顺序
+
+1. 提交本审计，保留现有 Profile、UCI 和生成架构。
+2. 设备阶段先锁定当前规则顺序，补 LuCI 保存与重读、IPv4/IPv6/MAC 和原生核心检查；确认策略变更后再改逻辑。
+3. Tailscale 阶段先使用合成数据校验 1.14.4 Endpoint；具备真实测试 Tailnet 时再验证控制面、路由和状态持久化。
+4. 部署阶段先复现 RC1 的两个发布缺陷，再小步修复并验证安装包。启动健康和备份语义单独确认。
+5. 最后复跑构建、测试、真实核心与 SDK 包检查，记录能实际完成的硬件验证。官方固件的运行结论等待对应环境。
+
 ## 开发与测试
 
 ```bash
