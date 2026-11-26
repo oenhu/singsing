@@ -169,7 +169,7 @@ MVP 完成后的整机重启、自启、IPv6、升级、安全及卸载复测记
 | 语法与静态检查 | POSIX `sh -n`、JSON 解析与 LuCI JS 语法检查 | 4 个 Shell 脚本、3 个 JSON 与 13 个 LuCI JS 文件全部通过。 |
 | sing-box 1.14.4（Linux ARM64） | `SINGSING_SING_BOX=/path/to/sing-box npm run test:sing-box` | 7 项全部通过（1.14.4 版本、Direct/GFWList、设备白/黑名单、官方+Headscale Tailscale Endpoint/MagicDNS/代理组、缺失规则集失败保护）。 |
 | OpenWrt 正式 SDK（r3） | `git diff 242d10a -- root/ htdocs/ src/ Makefile` 核对 | 阶段一至阶段四未修改打包运行文件，已验 r3 `.ipk` / `.apk` 产物内容保持一致。 |
-| LibWrt 25.12-SNAPSHOT 真机与 Debian | 非破坏性核对 r3 实装文件、`ash`/`ucode` 语法、1.14.4 `with_tailscale` 核心离线 `check`、设备分流与专用 Headscale 真机联调 | 9/9 核心运行文件 SHA-256 与仓库一致；Headscale 注册、去 `auth_key` 重启复用、MagicDNS FQDN、对端与通告子网互通、Exit Node 使用/通告批准、按 tag 选流与日志零凭据泄露均通过；还原后校验和一致，服务停用无残留，Debian 链路正常；官方 Tailscale 控制面与官方 24.10.8 / 25.12.6 固件运行待验。 |
+| LibWrt 25.12-SNAPSHOT 真机与 Debian | 非破坏性核对 r3 实装文件、`ash`/`ucode` 语法、1.14.4 `with_tailscale` 核心离线 `check`、设备分流、专用 Headscale 真机联调与 SysRq 硬复位（模拟断电）恢复 | 9/9 核心运行文件 SHA-256 与仓库一致；Headscale 联调全项及日志零凭据泄露通过；`auto_start=1` 硬复位后自动恢复 TUN/DNS/转发且可继续 `apply_config`，`auto_start=0` 硬复位后无 DNS 黑洞；还原后校验和一致，服务停用无残留，Debian 链路正常；物理拔电、官方 Tailscale 控制面与官方 24.10.8 / 25.12.6 固件运行待验。 |
 
 ## 致谢
 

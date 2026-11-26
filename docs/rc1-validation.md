@@ -56,3 +56,11 @@ r3 建议用于带已知限制的预发布。RC1 验收时曾记录两项待处�
 - **APK 卸载后可能残留 rpcd 注册**：标为**「不处理」**（不再作为发布门槛）。设备部署后通常不卸载，保留已有证据与已验证的手动重载办法 `/etc/init.d/rpcd reload`。
 - **规则集下载失败诊断包含原始 URL**：标为**「不处理」**（不再作为发布门槛）。保留现有诊断行为，分享失败诊断前由使用者自行移除 URL 凭据。
 - **`.lan` 查询被 sing-box 提前接管**：已接受现有行为，继续保留防止显式远程 DNS 规则将 `.lan` 转发到外部的保护。
+
+### 补充验证：SysRq 硬复位（模拟异常断电恢复，2026-11-26）
+
+在 `192.168.21.1`（LibWrt 25.12-SNAPSHOT）与 Debian 客户端 `192.168.21.2` 上，使用 Linux SysRq 立即硬复位（`echo b > /proc/sysrq-trigger`，跳过 `procd` 优雅停服、`dnsmasq_restore` 与文件系统正常卸载）模拟运行中突然断电（注：属软件触发硬复位模拟，不等同于物理拔电源）：
+
+- **场景一（`enabled=1, auto_start=1` 运行态硬复位）**：在 `sing-box`、`singtun` 与 RAM `dnsmasq` 接管生效时触发硬复位；约 83 秒恢复 SSH 后确认产生新 `boot_id`，`procd` 自动拉起 `sing-box`、`singtun`、`cache.db` 与 `dnsmasq-singsing.conf`，无残留事务文件；5 项持久化配置（UCI、DHCP、防火墙、活动 JSON、规则集清单）SHA-256 全部一致；Debian 客户端 DNS、直连访问及 `tun-in` 规则接管恢复正常，硬复位后再次执行 `apply_config` 通过（无残留锁）。
+- **场景二（`enabled=1, auto_start=0` 且 RAM `dnsmasq` 接管生效时硬复位）**：触发第二次硬复位后确认产生新 `boot_id`，`/tmp` 内存盘 `dnsmasq-singsing.conf` 随断电自动清除、`/etc/config/dhcp` 未被修改、`sing-box` 保持停用；Debian 客户端无需任何人工干预即直接恢复正常 DNS 与直连访问（无 DNS 黑洞）。
+- 验证结束后从本机备份还原路由器配置，5 项基线文件 SHA-256 全部一致，确认 `sing-box` 无残留进程、无 `singtun`、无 `dnsmasq` drop-in。
