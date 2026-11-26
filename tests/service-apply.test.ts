@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { serviceApplyFixture } from "./service-apply-harness";
 
@@ -86,5 +86,30 @@ describe("service-manager application transaction (OpenWrt commands mocked)", ()
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/stop/i);
     expect(read(f.running)).toBe("5335");
+  });
+
+  it("atomically replaces the active config inode, backs up last-good, publishes manifest, and updates dnsmasq drop-in on success", () => {
+    startPrevious();
+    const beforeIno = statSync(f.config).ino;
+    const result = f.apply({ MOCK_NEW_PORT: "5336" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(statSync(f.config).ino).not.toBe(beforeIno);
+    expect(read(f.config)).toBe(candidate);
+    expect(read(f.lastGood)).toBe(previous);
+    expect(read(f.manifest)).toBe('[{"tag":"candidate"}]');
+    expect(read(f.running)).toBe("5336");
+    expect(read(f.dropIn)).toContain("server=127.0.0.1#5336");
+    expect(read(f.events)).toBe("check\nstart-candidate\n");
+  });
+
+  it("removes the failed active config and restores dnsmasq when first-time apply fails startup", () => {
+    unlinkSync(f.config);
+    unlinkSync(f.lastGood);
+    const result = f.apply({ MOCK_FAIL_START: "1", MOCK_NEW_PORT: "5336" });
+    expect(result.status).toBe(1);
+    expect(existsSync(f.config)).toBe(false);
+    expect(existsSync(f.running)).toBe(false);
+    expect(existsSync(f.dropIn)).toBe(false);
+    expect(read(f.manifest)).toBe(activeManifest);
   });
 });

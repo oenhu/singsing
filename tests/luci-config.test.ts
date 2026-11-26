@@ -143,6 +143,28 @@ describe("LuCI client access control", () => {
     expect(h.modal().textContent).toContain("地址格式无效");
     expect(h.calls.some(({ method }) => method === "save_access_control" || method === "apply_config")).toBe(false);
   });
+
+  it("documents current boundary: buildCurrentConfig falls back to all mode when get_access_control fails", async () => {
+    const h = luci(profile());
+    h.override("get_access_control", async () => { throw new Error("access control store unreadable"); });
+    const built = await h.api.buildCurrentConfig();
+    expect(built.settings.accessControl).toEqual({ mode: "all", clients: [], deviceRules: [] });
+    expect(built.result.issues.filter((i) => i.level === "error")).toEqual([]);
+  });
+
+  it("documents current boundary: all mode can save a stale invalid client list while apply still rejects it", async () => {
+    const h = luci(profile());
+    const page = await h.view("routing");
+    accessMode(page.root).value = "all";
+    find(page.root, "textarea", (input) => String(input.attrs.placeholder).includes("每行一个 IPv4")).value = "not-a-valid-client";
+    await click(page.root, "保存访问控制");
+    expect(h.calls.some(({ method }) => method === "save_access_control")).toBe(true);
+
+    const applyRes = await page.view.handleSaveApply();
+    expect(applyRes).toMatchObject({ ok: false });
+    expect(applyRes?.validationErrors?.map((e) => e.message).join(" ")).toMatch(/访问控制设备列表格式无效/);
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
+  });
 });
 
 describe("LuCI configuration round trips", () => {

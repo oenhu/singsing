@@ -85,16 +85,17 @@ mv -f "$temp" /etc/singsing/sing-box.json
 | 模块 | 当前职责与证据 | 规划差距 |
 | --- | --- | --- |
 | 配置生成 | [upstream](src/upstream) 管理 Profile、节点、代理组、DNS、路由和原生 Tailscale Endpoint。常规 LuCI 生成通过 [adapter](src/adapter/config.ts) 调用上游。 | 定时订阅另有局部配置生成路径，见下文。 |
-| OpenWrt 适配 | [adapter](src/adapter) 调整 TUN、dnsmasq 对接用 DNS 入站、设备规则、本地规则集、缓存及状态目录。RC1 已验证原生 TUN、Auto Redirect、DNS 与 IPv4/IPv6 域名和地址分流。 | 设备来源地址、MAC 匹配及优先级缺少完整 1.14.4 和真机证据。 |
+| OpenWrt 适配 | [adapter](src/adapter) 调整 TUN、dnsmasq 对接用 DNS 入站、设备规则、本地规则集、缓存及状态目录。RC1 与阶段二已验证原生 TUN、Auto Redirect、DNS、IPv4/IPv6 与设备分流。 | 待决的设备策略边界和配置生成收敛待维护者确认。 |
 | LuCI 与 RPC | [LuCI API](htdocs/luci-static/resources/singsing/api.js) 让预览、核心校验和应用共用生成入口；[RPC](root/usr/share/rpcd/ucode/singsing.uc) 读取设置、保存 Profile、接受候选 JSON。Profile 和运行 JSON 分开存放。 | 不同操作各自读取当前设置。编辑配置后重新应用会重新生成候选；当前没有部署某次预览快照的约定。 |
-| 服务管理 | [procd 脚本](root/etc/init.d/singsing) 和 [Service Manager](root/usr/share/singsing/service-manager.sh) 管理规则集、真实核心校验、原子替换、启停、DNS 接管及恢复。RC1 在 LibWrt Snapshot 上验证重启、自启、候选拒绝和启动失败回滚。 | 目前先备份被替换的配置，按进程与 DNS 监听判断就绪。规划的“启动成功后记录新配置为最后有效版本”和单独 TUN 就绪检查仍需界定。 |
-| 设备分流 | [access.ts](src/adapter/access.ts) 生成原生 `source_ip_cidr`、`source_mac_address`。白名单、黑名单、指定出口与 DHCP 租约及邻居表选择已有代码，部分规则形态通过单测。 | 需要补齐页面保存与重读、IPv6、重叠规则顺序、核心校验与实体匹配证据。界面应说明随机 MAC 会影响匹配。 |
-| Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已有多 Tailnet、官方与 Headscale 控制服务器、Auth Key、MagicDNS、接收与通告子网、使用与通告出口及高级 JSON。相对状态路径由适配层持久化。现有测试包含 1.14.3 Schema 样例。 | 仍需 1.14.4 原生校验和独立真实 Tailnet 验证，覆盖状态持久、认证日志、MagicDNS、子网及出口。1.15 新字段留待最低版本升级。 |
-| 发布 | 两个正式 SDK 的包构建已通过，LibWrt Snapshot 有硬件结果。 | 卸载后 rpcd 注册残留、规则集下载失败诊断含完整 URL，均在 RC1 复现。OpenWrt 24.10.8 和 25.12.6 官方固件运行仍未验证。 |
+| 服务管理 | [procd 脚本](root/etc/init.d/singsing) 和 [Service Manager](root/usr/share/singsing/service-manager.sh) 管理规则集、真实核心校验、原子替换、启停、DNS 接管及恢复。RC1 在 LibWrt Snapshot 上验证重启、自启、候选拒绝和启动失败回滚；单测补充原子替换与首次启动失败清理。 | 目前先备份被替换的配置，按进程与 DNS 监听判断就绪。规划的“启动成功后记录新配置为最后有效版本”和单独 TUN 就绪检查仍需界定。 |
+| 设备分流 | [access.ts](src/adapter/access.ts) 生成原生 `source_ip_cidr`、`source_mac_address`。阶段二已补齐 LuCI 保存与重读、IPv4/IPv6/MAC、重叠规则顺序、1.14.4 核心校验与真实客户端匹配证据。 | 随机 MAC 说明已记入文档；设备策略读取失败回落与 `all` 模式旧列表边界已用隔离单测记录，是否调整待维护者确认。 |
+| Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已有多 Tailnet、官方与 Headscale 控制服务器、Auth Key、MagicDNS、接收与通告子网、使用与通告出口，导入的高级原生字段可保留。阶段三已通过 LuCI 保存重读/校验测试、1.14.4 导出 Schema 及真实 `sing-box 1.14.4`（含路由器实机核心）离线校验。 | 同一端点同时填 `exit_node` 与 `advertise_exit_node` 会被 1.14.4 核心拒绝（表单未前置拦截，应用前由 `sing-box check` 拒绝）。独立真实 Tailnet / Headscale 联调等待维护者提供测试环境；1.15 新字段留待最低版本升级。 |
+| 发布 | 两个正式 SDK 的 r3 包构建与校验已通过，LibWrt Snapshot 有硬件结果；阶段一至阶段四未修改任何打包运行文件，r3 包内容与 `242d10a` 一致。 | 卸载后 rpcd 注册残留、规则集下载失败诊断含完整 URL 均已按维护者决定标为「不处理」（保留既有证据与手动重载办法）。OpenWrt 24.10.8 和 25.12.6 官方固件运行仍未验证。 |
 
 ### 需要确认的现有行为
 
-- **设备规则优先级。** 同一配置的生成结果显示，DNS 及内置保护、适用的直连列表和有序自定义规则可在设备规则之前命中。设备指定出口按保存顺序排列，并先于白名单或黑名单规则；设备规则整体早于默认分流模式。若让设备策略覆盖普通自定义规则，命中两者的用户流量会改道。现有“所有设备按分流策略”模式也能保存旧的无效设备列表，生成时仍报错；读取设备策略失败时，生成入口可能回落到 `all`。这些边界先测试与确认。
+- **设备规则优先级与边界。** 同一配置的生成结果显示，DNS 及内置保护、适用的直连列表和有序自定义规则可在设备规则之前命中。设备指定出口按保存顺序排列，并先于白名单或黑名单规则；设备规则整体早于默认分流模式。若让设备策略覆盖普通自定义规则，命中两者的用户流量会改道。现有“所有设备按分流策略”模式也能保存旧的无效设备列表，生成时仍报错；读取设备策略失败时，生成入口回落到 `all`。两项边界已用隔离单测记录，保持现状直至维护者确认。
+- **Tailscale 出口节点互斥约束。** 真实 `sing-box 1.14.4` 拒绝同一 Tailscale 端点同时设置 `exit_node` 与 `advertise_exit_node: true`（即使 Schema 允许）。目前应用前由 `sing-box check` 拦截，图形表单暂未前置阻止；是否增加表单与适配层校验待维护者确认。
 - **订阅配置生成。** LuCI 订阅导入使用上游引擎。[定时订阅程序](root/usr/share/singsing/subscription-updater.uc) 自行解析部分订阅格式，并在 `patchRunningConfig` 重建节点与代理组片段，然后把候选交给 Service Manager。这是目前最明确的重复生成代码。应先对照两条路径的输出与升级行为。移除局部生成必须先解决后台自动应用的兼容性。
 - **运行备份的语义。** 现有 `last-good` 在下一次应用开始时保存当时的活动文件。要改为始终保存最近健康的配置，需要明确首次应用成功、关闭自动回滚和活动文件已损坏时的预期行为。
 
@@ -102,11 +103,11 @@ mv -f "$temp" /etc/singsing/sing-box.json
 
 ### 最小实施顺序
 
-1. 提交本审计，保留现有 Profile、UCI 和生成架构。
-2. 设备阶段先锁定当前规则顺序，补 LuCI 保存与重读、IPv4/IPv6/MAC 和原生核心检查；确认策略变更后再改逻辑。
-3. Tailscale 阶段先使用合成数据校验 1.14.4 Endpoint；具备真实测试 Tailnet 时再验证控制面、路由和状态持久化。
-4. 部署阶段先复现 RC1 的两个发布缺陷，再小步修复并验证安装包。启动健康和备份语义单独确认。
-5. 最后复跑构建、测试、真实核心与 SDK 包检查，记录能实际完成的硬件验证。官方固件的运行结论等待对应环境。
+1. 阶段一：提交本审计，保留现有 Profile、UCI 和生成架构（已完成）。
+2. 阶段二：设备阶段锁定当前规则顺序，补 LuCI 保存与重读、IPv4/IPv6/MAC、1.14.4 核心检查与真机实测证据（已完成）。
+3. 阶段三：Tailscale 阶段使用合成数据完成 LuCI 测试与 1.14.4 Endpoint 离线核心校验；待维护者提供专用测试环境后再验证真实 Tailnet / Headscale 控制面、路由和状态持久化（离线部分已完成，在线真机待验）。
+4. 阶段四：部署复核 procd、校验、原子替换、失败恢复、DNS 清理与安装包，按维护者决定将两项 RC1 遗留项更新为「不处理」并保留旧验收事实（已完成）。
+5. 最终复跑构建、测试、真实 1.14.4 核心、语法检查与非破坏性硬件复核；官方 24.10.8 / 25.12.6 固件运行结论等待对应环境。
 
 ### 设备分流验证
 
@@ -155,6 +156,16 @@ make package/luci-app-singsing/compile V=s
 修改前，LuCI 补测复现 12 项故障，应用事务补测复现 5 项故障。第五阶段分别复现 1 项 UCI 会话提交故障和 2 项可选 ECS 表单故障。修复后的回归包含在上述 Vitest 结果中。
 
 MVP 完成后的整机重启、自启、IPv6、升级、安全及卸载复测记录在 [RC1 真机验收](docs/rc1-validation.md)。OpenWrt 24.10.8 与 25.12.6 官方固件运行和整机断电恢复仍未验证。
+
+### 阶段二至阶段四补充验证
+
+| 验证环境 | 执行内容 | 结果 |
+| --- | --- | --- |
+| 本地 Vitest（Mock） | `npm ci && npm run build && npm test` | 123 项通过（覆盖适配器、LuCI 节点/DNS/分流/设备/Tailscale 往返与边界、服务应用事务原子替换与回滚）。另有 7 项核心用例由独立命令运行。 |
+| 语法与静态检查 | POSIX `sh -n`、JSON 解析与 LuCI JS 语法检查 | 4 个 Shell 脚本、3 个 JSON 与 13 个 LuCI JS 文件全部通过。 |
+| sing-box 1.14.4（Linux ARM64） | `SINGSING_SING_BOX=/path/to/sing-box npm run test:sing-box` | 7 项全部通过（1.14.4 版本、Direct/GFWList、设备白/黑名单、官方+Headscale Tailscale Endpoint/MagicDNS/代理组、缺失规则集失败保护）。 |
+| OpenWrt 正式 SDK（r3） | `git diff 242d10a -- root/ htdocs/ src/ Makefile` 核对 | 阶段一至阶段四未修改打包运行文件，已验 r3 `.ipk` / `.apk` 产物内容保持一致。 |
+| LibWrt 25.12-SNAPSHOT 真机与 Debian | 非破坏性核对 r3 实装文件、`ash`/`ucode` 语法、1.14.4 `with_tailscale` 核心离线 `check` 及设备分流实测 | 9/9 核心运行文件 SHA-256 与仓库一致，Tailscale 配置通过路由器 `sing-box check`，服务保持停用无残留，Debian 链路正常；真实 Tailnet 联调与官方 24.10.8 / 25.12.6 固件运行待验。 |
 
 ## 致谢
 
