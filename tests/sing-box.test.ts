@@ -5,6 +5,7 @@ import Ajv2020 from "ajv/dist/2020";
 import type { ValidateFunction } from "ajv";
 import { describe, expect, it } from "vitest";
 import { blueprintProfile, defaultOpenWrtSettings, generateOpenWrtConfig, newDnsRule, newNode, newRule } from "../src/adapter/index";
+import type { OpenWrtAccessControl } from "../src/adapter/index";
 import { serviceApplyFixture } from "./service-apply-harness";
 
 const binary = process.env.SINGSING_SING_BOX ? resolve(process.env.SINGSING_SING_BOX) : "sing-box";
@@ -16,7 +17,7 @@ function run(...args: string[]) {
   });
 }
 
-function generatedConfig(dir: string, mode: "GFWList" | "Direct" = "Direct") {
+function generatedConfig(dir: string, mode: "GFWList" | "Direct" = "Direct", accessControl?: OpenWrtAccessControl) {
   const p = blueprintProfile();
   const node = newNode({
     tag: "mvp-vless",
@@ -42,6 +43,7 @@ function generatedConfig(dir: string, mode: "GFWList" | "Direct" = "Direct") {
   settings.dns.localServerName = "dns.alidns.com";
   settings.paths.cacheFile = join(dir, "cache.db");
   settings.paths.ruleSetDir = dir;
+  settings.accessControl = accessControl;
   const generated = generateOpenWrtConfig(p, settings);
   expect(generated.issues.filter(({ level }) => level === "error")).toEqual([]);
   return generated;
@@ -73,6 +75,30 @@ describe.skipIf(process.env.SINGSING_VERIFY_CORE !== "1")("sing-box 1.14.4 binar
     const f = serviceApplyFixture();
     try {
       const { config, ruleSets } = generatedConfig(f.dir, mode);
+      writeLocalRuleSets(f.dir, ruleSets);
+      writeCheckedJSON(f.config, config);
+      expect(() => run("check", "-c", f.config)).not.toThrow();
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it.each(["allowlist", "blocklist"] as const)("accepts native device selectors and a custom node with %s", (mode) => {
+    const f = serviceApplyFixture();
+    try {
+      const { config, ruleSets } = generatedConfig(f.dir, "Direct", {
+        mode,
+        clients: ["192.0.2.42", "2001:db8:21::/64", "02:00:00:00:00:42"],
+        deviceRules: [
+          {
+            id: "test-device",
+            name: "Example device",
+            clients: ["2001:db8:21::42"],
+            outbound: "mvp-vless",
+            enabled: true,
+          },
+        ],
+      });
       writeLocalRuleSets(f.dir, ruleSets);
       writeCheckedJSON(f.config, config);
       expect(() => run("check", "-c", f.config)).not.toThrow();

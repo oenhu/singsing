@@ -23,7 +23,9 @@ type Rule = {
   outbound?: string;
   clash_mode?: string;
   domain?: string[];
+  inbound?: string;
   ip_cidr?: string[];
+  ip_is_private?: boolean;
   rule_set?: string | string[];
 };
 
@@ -60,6 +62,88 @@ async function addRoute(h: Harness, root: Element, outbound: string, lines: stri
   }
   await click(modal, "保存规则");
 }
+
+function accessMode(root: Element) {
+  return find(root, "select", (select) => select.elements("option").some((option) => option.value === "blocklist"));
+}
+
+describe("LuCI client access control", () => {
+  it("saves discovered LAN devices and ordered outbound rules, reloads them, and generates native rules", async () => {
+    const p = profile();
+    p.settings.rules = [newRule({ outbound: "proxy", lines: ["domain:ordinary.example"] })];
+    p.groups = [newGroup({ id: "group", tag: "office-group", members: ["existing-node"] })];
+    const h = luci(p);
+    h.override("get_lan_clients", () => ({ clients: [
+      { ip: "192.168.21.50", mac: "02:00:00:00:00:50", hostname: "office" },
+    ] }));
+
+    const { root } = await h.view("routing");
+    accessMode(root).value = "blocklist";
+    const clients = find(root, "textarea", (input) => String(input.attrs.placeholder).includes("每行一个 IPv4"));
+    clients.value = "2001:db8:21::/64";
+    const device = find(root, "select", (select) => select.elements("option").some((option) => option.value === "192.168.21.50"));
+    device.value = "192.168.21.50";
+    await click(root, "添加 MAC");
+    device.value = "192.168.21.50";
+    await click(root, "添加 IP");
+    await click(root, "保存访问控制");
+
+    for (const [name, target, entries] of [
+      ["Office selector", "office-group", "192.168.21.50\n2001:db8:21::50"],
+      ["Office node", "existing", "192.168.21.50"],
+    ]) {
+      await click(root, "新增设备指定出口");
+      const modal = h.modal();
+      find(modal, "input", (input) => input.attrs.type === "text").value = name;
+      const option = find(modal, "select");
+      expect(option.elements("option").map((item) => item.value)).toContain(target);
+      option.value = target;
+      find(modal, "textarea").value = entries;
+      await click(modal, "保存");
+    }
+
+    const reloaded = await h.view("routing");
+    expect(accessMode(reloaded.root).value).toBe("blocklist");
+    expect(find(reloaded.root, "textarea", (input) => String(input.attrs.placeholder).includes("每行一个 IPv4")).value)
+      .toBe("2001:db8:21::/64\n02:00:00:00:00:50\n192.168.21.50");
+    expect(row(reloaded.root, "Office selector").textContent).toContain("office-group");
+    expect(row(reloaded.root, "Office node").textContent).toContain("existing");
+    expect(h.calls.some(({ method }) => method === "apply_config")).toBe(false);
+
+    const preview = (await h.api.buildCurrentConfig()).result.config;
+    expect(await reloaded.view.handleSaveApply()).toMatchObject({ ok: true });
+    const { config } = applied(h);
+    expect(config).toEqual(preview);
+    const rules: Rule[] = config.route.rules;
+    const explicit = rules.findIndex((rule) => rule.domain?.includes("ordinary.example"));
+    const privateDirect = rules.findIndex((rule) => rule.ip_is_private && rule.outbound === "direct");
+    const modeFallback = rules.findIndex((rule) => rule.clash_mode === "Direct");
+    expect(rules[0]).toEqual({ inbound: "dns-in", action: "hijack-dns" });
+    expect(explicit).toBeGreaterThan(0);
+    expect(privateDirect).toBeGreaterThan(explicit);
+    expect(rules.slice(privateDirect + 1, modeFallback)).toEqual([
+      { source_ip_cidr: ["192.168.21.50/32", "2001:db8:21::50/128"], action: "route", outbound: "office-group" },
+      { source_ip_cidr: ["192.168.21.50/32"], action: "route", outbound: "existing" },
+      {
+        type: "logical", mode: "or", action: "route", outbound: "direct",
+        rules: [
+          { source_ip_cidr: ["2001:db8:21::/64", "192.168.21.50/32"] },
+          { source_mac_address: ["02:00:00:00:00:50"] },
+        ],
+      },
+    ]);
+  });
+
+  it("reports an invalid device selector before saving or applying it", async () => {
+    const h = luci(profile());
+    await click((await h.view("routing")).root, "新增设备指定出口");
+    const modal = h.modal();
+    find(modal, "textarea").value = "2001:db8::/129";
+    await click(modal, "保存");
+    expect(h.modal().textContent).toContain("地址格式无效");
+    expect(h.calls.some(({ method }) => method === "save_access_control" || method === "apply_config")).toBe(false);
+  });
+});
 
 describe("LuCI configuration round trips", () => {
   it("adds, edits and deletes a node across page reloads and maps ID references to the saved tag", async () => {
