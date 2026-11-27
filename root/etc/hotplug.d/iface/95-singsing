@@ -1,6 +1,9 @@
 #!/bin/sh
 
-if [ "${ACTION:-}" = "ifup" ] && [ -n "${INTERFACE:-}" ]; then
+if [ -n "${INTERFACE:-}" ] && {
+	[ "${ACTION:-}" = "ifup" ] ||
+	{ [ "${ACTION:-}" = "ifupdate" ] && { [ "${IFUPDATE_ADDRESSES:-0}" = "1" ] || [ "${IFUPDATE_PREFIXES:-0}" = "1" ]; }; }
+}; then
 	# TUN and DNS readiness checks must not delay other interface events.
 	/usr/share/singsing/service-manager.sh wan_ifup "$INTERFACE" >/dev/null 2>&1 &
 fi

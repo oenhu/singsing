@@ -16,27 +16,27 @@
 - **静态节点多格式导入**：节点管理页直接复用上游 `singbox-confgen` 解析器，支持粘贴导入 sing-box JSON / Clash / Mihomo YAML / Base64 / SIP008 / 分享链接，不内置后台订阅定时拉取或第二套配置生成引擎。
 - **安全事务与自动回滚**：独立运行配置路径 `/etc/singsing/sing-box.json`（自动停用系统冲突的 `/etc/init.d/sing-box`），应用前强制 `sing-box check`，支持自定义核心路径与 `no_new_privs` 加固，启动检查同时覆盖进程、DNS 监听与 TUN 接口就绪，成功后原子刷新 `sing-box.last-good.json`，失败自动回滚并还原 `dnsmasq`。
 
-## 安装、升级和卸载（v0.1.3 / 0.1.3-r2 修复候选）
+## 安装、升级和卸载（v0.1.3 / 0.1.3-r3 修复候选）
 
 ### 环境与安装包
 
 > [!IMPORTANT]
-> GitHub 原始发布包 `v0.1.3`（`0.1.3-r1`，基线 `a5ddb08`）在两套官方 OpenWrt VM 复测中复现 4 项问题：1) 无参 `check_local_dns` 误判导致已填合法 DNS 仍拒绝启动；2) 24.10 `.ipk` 归档带有 `1001:1001` 属主改写系统目录；3) 首次开启规则集定时更新时干净系统 `crond` 未启动；4) 卸载后 `luci.singsing` 仍残留在 `ubus`。以下验证结果对应已修复上述 4 项的本地候选构建 **`0.1.3-r2`**。
+> GitHub 原始发布包 `v0.1.3`（`0.1.3-r1`，基线 `a5ddb08`）在两套官方 OpenWrt VM 复测中复现 4 项问题（无参 `check_local_dns` 误判、24.10 `.ipk` 属主污染、首次开启规则集定时更新未启动 `crond`、卸载后 `luci.singsing` 残留），已在 `0.1.3-r2` 与 `0.1.3-r3` 中全部修复；`0.1.3-r3` 进一步尊重系统 `cron` 开关、通过 OpenWrt 原生 `network_find_wan`/`hotplug.d` 适配任意逻辑 WAN 名称及 `ifupdate` 地址/前缀变更，并修复 Tailscale Exit Node 通告子网 OR 放行规则。
 
-| 环境 | 安装包（`0.1.3-r2`） | SHA-256 | 验证范围 |
+| 环境 | 安装包（`0.1.3-r3`） | SHA-256 | 验证范围 |
 | --- | --- | --- | --- |
-| OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`) | `luci-app-singsing_0.1.3-r2_all.ipk` | `ba5452deb7bbeb27445460d0139986cf69da4f90793494078cb642bbc65da092` | 正式 SDK（非 root UID 1001 环境）构建、静态包与 `0:0` 属主校验、官方 24.10.8 `armsr/armv8` QEMU VM 新装/启停/重启/规则集 cron 实触发/开机自启/卸载清理及 `0.1.1-r1 → 0.1.3-r2` 升级全部通过 |
-| OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`) | `luci-app-singsing-0.1.3-r2.apk` | `177abd1e6d30a4d2f6f4594872cb33241fbdddce49c5a73ad628deac5fa67272` | 正式 SDK 构建、静态包与 `root:root` 属主校验、官方 25.12.6 `armsr/armv8` QEMU VM 新装/启停/重启/规则集 cron 实触发/开机自启/卸载清理及 `0.1.1-r1 → 0.1.3-r2` 升级全部通过 |
-| LibWrt 25.12-SNAPSHOT (`r0-96a0ec8`, kernel `6.12.112`, `qualcommax/ipq60xx`) | 同一 `0.1.3-r2` APK | `177abd1e6d30a4d2f6f4594872cb33241fbdddce49c5a73ad628deac5fa67272` | 真机 `0.1.1-r1 → 0.1.3-r2` 升级、4 模式实际出口、本地可信 HTTPS 原生测速、`mixed-in`、规则优先级实测矩阵、MAC 冲突与访问控制、DNS 故障切换/DoH 引导、IPv6 PD 与续租、WAN 重拨、自建 Headscale 子网与 Exit Node 转发、整机重启自启与现场还原全部完成（核心 `sing-box 1.14.4`） |
+| OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`) | `luci-app-singsing_0.1.3-r3_all.ipk` | `199ebc7f6b321e6ba0e3a6c91b8c20c16c15341df4079bb2da9172e2a0ace87d` | 正式 SDK 构建、静态包与 `0:0` 属主校验、官方 24.10.8 QEMU VM 新装/启停/重启/规则集 cron 实触发/动态 WAN 热插拔/卸载清理及升级全部通过 |
+| OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`) | `luci-app-singsing-0.1.3-r3.apk` | `9f40c9e2b6557efe54593ac0df3879b572f2efc992b2599361385e45116c0c24` | 正式 SDK 构建、静态包与 `root:root` 属主校验、官方 25.12.6 QEMU VM 新装/启停/重启/规则集 cron 禁用尊重/动态 WAN 热插拔/卸载清理及升级全部通过 |
+| LibWrt 25.12-SNAPSHOT (`r0-96a0ec8`, kernel `6.12.112`, `qualcommax/ipq60xx`) | 同一 `0.1.3-r3` APK | `9f40c9e2b6557efe54593ac0df3879b572f2efc992b2599361385e45116c0c24` | 真机 `0.1.1-r1 → 0.1.3-r3` 升级、`0:0` 属主、大写 `WAN`/`WAN_6` 自动识别与 `wan_dns` 去重、真实 PPPoE 重拨与运营商 IPv6 PD 续租自动重载、`ifupdate` 地址/前缀热插拔与禁用 `cron` 尊重均通过（核心 `sing-box 1.14.4`） |
 
-在路由器上先执行 `sing-box version`。当前验证核心为 **1.14.4**，默认路径是 `/usr/bin/sing-box`。选择对应固件的安装包，并对照 `SHA256SUMS` 检查文件。
+在路由器上先执行 `sing-box version`。当前验证核心为 **1.14.4**，默认路径是 `/usr/bin/sing-box`。选择对应固件的安装包，并对照 Release 的 `SHA256SUMS` 检查文件。
 
 ```sh
 # OpenWrt 24.10
-opkg install ./luci-app-singsing_0.1.3-r2_all.ipk
+opkg install ./luci-app-singsing_0.1.3-r3_all.ipk
 
 # OpenWrt 25.12 / 本次验证的 LibWrt Snapshot
-apk add --allow-untrusted ./luci-app-singsing-0.1.3-r2.apk
+apk add --allow-untrusted ./luci-app-singsing-0.1.3-r3.apk
 ```
 
 依赖包来自设备固件对应的软件源。安装后进入 **服务 → Sing-Box**，填写直连上游 DNS IP，保存节点及分流。可在运行概览先点击「生成配置」完成离线校验与写入，再通过「启用服务」开关或「启动」按钮一键拉起服务。成功后在运行概览确认 TUN 状态，在运行日志确认 DNS 转发。
@@ -51,7 +51,7 @@ tar -czf /root/singsing-backup.tgz -C / etc/config/singsing etc/singsing
 /etc/init.d/singsing stop
 ```
 
-- **全新安装默认 UCI（`0.1.3-r2`）**：`tun.strict_route='0'`、`tun.ipv6_mode='direct'`、`tun.mtu='9000'`、`mixed.enabled='0'`、`routing.bypass_cn='1'`、`routing.cn_site_ruleset='geosite-cn'`、`routing.port_mode='all'`、`routing.block_quic='0'`、`main.ruleset_auto_update='0'`、`main.ruleset_update_cron='0 4 * * *'`。
+- **全新安装默认 UCI（`0.1.3-r3`）**：`tun.strict_route='0'`、`tun.ipv6_mode='direct'`、`tun.mtu='9000'`、`mixed.enabled='0'`、`routing.bypass_cn='1'`、`routing.cn_site_ruleset='geosite-cn'`、`routing.port_mode='all'`、`routing.block_quic='0'`、`main.ruleset_auto_update='0'`、`main.ruleset_update_cron='0 4 * * *'`。
 - **从 `0.1.1-r1` 升级行为（已实测）**：旧 `/etc/config/singsing`（含原有 `dns.local_server` 与 `tun.strict_route='1'`）及 `/etc/singsing/sing-box.json` 均完整保留；`uci-defaults/99-singsing` 仅按缺失补齐 `mixed` 与 `routing` 段，**不覆盖已有 `tun` 段**，因此旧 UCI 中 `tun.strict_route` 保持 `'1'`，`tun.ipv6_mode` 与 `tun.mtu` 在 UCI 中保持未设置（`<unset>`）；再次通过 LuCI 预览/生成配置时，前端 `api.js` 与适配层会对缺失的 `tun.ipv6_mode` 按 `'direct'`、缺失的 `tun.mtu` 按 `9000` 生成有效配置（`strict_route` 仍沿用旧值 `true`，用户可在设置页按需改为关闭）。
 
 升级后检查活动 Profile、节点及 DNS 设置，预览并应用配置，再从局域网客户端验证 DNS、直连和代理。如果新包无法正常运行，停止服务，重新安装上一个可用包并从备份恢复插件配置，再运行 `sing-box check` 后启动。
@@ -65,7 +65,7 @@ opkg remove luci-app-singsing    # OpenWrt 24.10
 apk del luci-app-singsing        # OpenWrt 25.12
 ```
 
-`0.1.3-r2` 已在包卸载钩子中自动停止服务、清理 TUN / nftables / dnsmasq 接管 / `# singsing-ruleset` 定时任务，并在 `postrm`（24.10）/ `post-deinstall`（25.12）清理 LuCI 缓存并执行 `/etc/init.d/rpcd reload`，卸载后 `luci.singsing` 立即从 `ubus` 注销且用户配置文件保留（如从旧版 `0.1.3-r1` 及更早版本卸载，仍需手动执行一次 `/etc/init.d/rpcd reload`）。随后从客户端确认路由器 DNS 和直连 HTTPS 恢复。备份用于重新安装后恢复 Profile 和插件设置。重新安装前确认已有配置的启用状态，设备可能按保留的启用设置自动启动服务。
+`0.1.3-r2` / `0.1.3-r3` 已在包卸载钩子中自动停止服务、清理 TUN / nftables / dnsmasq 接管 / `# singsing-ruleset` 定时任务，并在 `postrm`（24.10）/ `post-deinstall`（25.12）清理 LuCI 缓存并执行 `/etc/init.d/rpcd reload`，卸载后 `luci.singsing` 立即从 `ubus` 注销且用户配置文件保留（如从旧版 `0.1.3-r1` 及更早版本卸载，仍需手动执行一次 `/etc/init.d/rpcd reload`）。随后从客户端确认路由器 DNS 和直连 HTTPS 恢复。备份用于重新安装后恢复 Profile 和插件设置。重新安装前确认已有配置的启用状态，设备可能按保留的启用设置自动启动服务。
 
 ### 故障恢复
 
@@ -96,7 +96,7 @@ mv -f "$temp" /etc/singsing/sing-box.json
 | 服务管理 | [procd 脚本](root/etc/init.d/singsing) 和 [Service Manager](root/usr/share/singsing/service-manager.sh) 管理规则集、真实核心校验、原子替换、启停、DNS 接管及恢复。 | 已在就绪检查中纳入 TUN 接口检测，并在应用成功后原子刷新 `sing-box.last-good.json`（含首次成功应用）。 |
 | 设备分流 | [access.ts](src/adapter/access.ts) 生成原生 `source_ip_cidr`、`source_mac_address`，已通过 LuCI、1.14.4 核心及真机客户端匹配验证。 | `all` 模式下保存与应用一致忽略未使用的旧设备列表；`get_access_control` 失败显式阻断生成。 |
 | Tailscale | [Tailscale 页面](htdocs/luci-static/resources/view/singsing/tailscale.js) 已支持多 Tailnet、官方与 Headscale、MagicDNS、子网路由与出口节点，并完成专用 Headscale 真机闭环联调。 | 1) 已在表单与 `validation.ts` 前置禁止同一端点同时配置 `exit_node` 与 `advertise_exit_node`；2) 已调整 DNS 规则顺序为 `.lan` 保护 → Tailscale MagicDNS `preferred_by` → 单标签 `^[^.]+$` `NXDOMAIN`；3) 官方 Tailscale 控制面按维护者决定不再单独考虑，后续仅随上游关注 1.15 新字段。 |
-| 发布 | `0.1.3-r2` `.ipk`（24.10.8 SDK）与 `.apk`（25.12.6 SDK）已通过构建、`0:0` 属主静态门禁、官方 24.10.8 / 25.12.6 QEMU VM 全链路运行及 LibWrt 真机验收，保留 `+kmod-nft-queue` 依赖。 | `0.1.3-r2` 已通过 `postrm` 修复卸载后 `rpcd` 注册残留；规则集下载失败诊断含完整 URL 维持不处理；规则优先级语义与非标准大写 `WAN` 触发器待后续按维护者决策处理。 |
+| 发布 | `0.1.3-r3` `.ipk`（24.10.8 SDK）与 `.apk`（25.12.6 SDK）已通过构建、`0:0` 属主静态门禁、官方 24.10.8 / 25.12.6 QEMU VM 与 LibWrt 真机（含 PPPoE 重拨、IPv6 PD 续租与 `ifupdate` 热插拔）全链路验收，保留 `+kmod-nft-queue` 依赖。 | 已修复卸载 `rpcd` 注册残留、系统 `cron` 开关尊重、动态 WAN 检测及 Tailscale Exit Node 子网 OR 放行；规则集下载失败诊断含完整 URL 维持不处理。 |
 
 ### 已收敛的设计边界（r4）
 

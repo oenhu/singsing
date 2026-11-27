@@ -680,7 +680,7 @@ describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces
     expect(gfwAAAA.evaluated).toEqual(["remote"]);
   });
 
-  it("adds Tailscale Exit Node inbound DNS hijack & LAN/subnet direct rules when advertise_exit_node is enabled", () => {
+  it("adds Tailscale Exit Node inbound DNS hijack & LAN/subnet direct rules with logical OR when advertise_exit_node is enabled", () => {
     const p = blueprintProfile();
     p.settings.tailnets = [
       newTailnet({
@@ -689,8 +689,18 @@ describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces
           state_directory: "ts-exit",
           hostname: "openwrt",
           advertise_exit_node: true,
-          advertise_routes: ["192.168.10.0/24"],
+          advertise_routes: ["198.51.100.0/24"],
           exit_node_allow_lan_access: true,
+        }),
+      }),
+      newTailnet({
+        tag: "ts-sub-only",
+        endpoint: JSON.stringify({
+          state_directory: "ts-sub-only",
+          hostname: "openwrt-sub",
+          advertise_exit_node: true,
+          advertise_routes: ["10.99.0.0/16"],
+          exit_node_allow_lan_access: false,
         }),
       }),
     ];
@@ -699,9 +709,19 @@ describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces
     expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
     expect(config.route.rules).toContainEqual({ inbound: "ts-exit", port: 53, action: "hijack-dns" });
     expect(config.route.rules).toContainEqual({
-      inbound: "ts-exit",
-      ip_is_private: true,
-      ip_cidr: ["192.168.10.0/24"],
+      type: "logical",
+      mode: "and",
+      rules: [
+        { inbound: "ts-exit" },
+        { type: "logical", mode: "or", rules: [{ ip_is_private: true }, { ip_cidr: ["198.51.100.0/24"] }] },
+      ],
+      action: "route",
+      outbound: "direct",
+    });
+    expect(config.route.rules).toContainEqual({ inbound: "ts-sub-only", port: 53, action: "hijack-dns" });
+    expect(config.route.rules).toContainEqual({
+      inbound: "ts-sub-only",
+      ip_cidr: ["10.99.0.0/16"],
       action: "route",
       outbound: "direct",
     });

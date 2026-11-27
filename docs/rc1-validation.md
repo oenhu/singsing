@@ -141,4 +141,18 @@ r3 建议用于带已知限制的预发布。RC1 验收时曾记录两项待处�
 - **端口与 QUIC**。常规测试覆盖 common/custom、开启与关闭内核 bypass、默认代理与直连、设备指定代理和显式代理。LuCI 文案与既有规则优先级一致。
 - **发布门槛**。两版均复测目录属主、有效 DNS 启动、重启自启、坏配置启动回滚、运行期配置应用失败回滚，以及卸载后清理 RPC、TUN、dnsmasq 接管和热插拔脚本。两版运行中的 `0.1.3-r2 → 0.1.3-r3` 升级均保留配置和运行服务，旧 procd WAN 触发器完成注销。
 
-真机待复测实际 PPPoE 重拨和运营商 IPv6 PD 续租。本轮覆盖 OpenWrt `ifup`，仅产生 `ifupdate` 的续租场景另行记录。
+### 补充验证：`0.1.3-r3` 实机 PPPoE 重拨、IPv6 PD 续租与边界修复（2026-11-27）
+
+在 `2174725` 基础上补充修复并验证以下 3 项：
+1. **Tailscale Exit Node 放行规则修复**（`src/adapter/routing.ts`）：同时配置 `advertise_exit_node: true` 与 `advertise_routes` 时，原规则将 `ip_is_private: true` 与 `ip_cidr` 置于同一规则对象导致按逻辑 AND 匹配（非私网通告子网与非通告私网均无法命中）；已改为原生逻辑 `and([inbound, or([ip_is_private, ip_cidr])])`，并在 `exit_node_allow_lan_access: false` 时仍独立放行通告子网。
+2. **WAN 热插拔支持地址/前缀变更的 `ifupdate`**（`root/etc/hotplug.d/iface/95-singsing`）：除 `ACTION=ifup` 外，在 `ACTION=ifupdate` 且 `IFUPDATE_ADDRESSES=1` 或 `IFUPDATE_PREFIXES=1` 时触发 `wan_ifup` 重载，常规无变更续租（未设置该标记）仍忽略不重启。
+3. **真实 `sing-box 1.14.4` 核心用例扩充**（`tests/sing-box.test.ts`）：新增 4 项 `v0.1.3` 网关特性核心与 Schema 校验用例（Pre-Match Bypass、`geosite-cn`、`route_exclude_cn`、`mixed-in`、`port_mode`、`block_quic`、DoH 域名+引导 IP、备用直连 DNS、3 种 `tun.ipv6_mode` 及 Tailscale Exit Node 通告子网规则）。
+
+- **本地自动化与核心测试**：`npm run build` 通过、`npm test` **151/151 通过**、`npm run test:sing-box` **13/13 通过**（Linux `sing-box 1.14.4`），两套正式 SDK 打包与 `verify-openwrt-package.sh`（含 `0:0` 属主门禁）均通过：
+  - `luci-app-singsing_0.1.3-r3_all.ipk` — SHA-256: `199ebc7f6b321e6ba0e3a6c91b8c20c16c15341df4079bb2da9172e2a0ace87d`
+  - `luci-app-singsing-0.1.3-r3.apk` — SHA-256: `9f40c9e2b6557efe54593ac0df3879b572f2efc992b2599361385e45116c0c24`
+- **LibWrt 25.12-SNAPSHOT 真机（`192.168.21.1`，大写 `WAN` / `WAN_6`）与 Debian 客户端（`192.168.21.2`）实测**：
+  - `0.1.1-r1 → 0.1.3-r3` 覆盖升级成功，系统目录及 `95-singsing` 属主全为 `0:0`；`status` 与 `dns_check` 均自动探测并去重大写 `WAN`/`WAN_6` DNS（`218.104.78.2`、`58.242.2.2`、`2408:8000:c000::8888`）。
+  - 热插拔精准性：`lan` `ifup` 与无变更的 `WAN_6` `ifupdate` 均保持原 PID（`12430`）不重启；`WAN_6` `ifupdate`（`IFUPDATE_PREFIXES=1`）重载 `12430 → 13116`，`WAN` `ifupdate`（`IFUPDATE_ADDRESSES=1`）重载 `13116 → 13737`。
+  - **真实 PPPoE 重拨与运营商 IPv6 PD 续租**：执行 `ifup WAN` 后，`95-singsing` 自动重载 `sing-box`（`13737 → 15125`），随后 `WAN_6` 取得新委派前缀（`2408:8244:210:24b8::/64 → 2408:8244:310:bcb::/64`）并自动完成重载（`15125 → 15988`）；Debian 客户端自动获取新前缀地址 `2408:8244:310:bcb:...`，DNS（`www.baidu.com` `NOERROR`、`router.lan` `NXDOMAIN`）、IPv4 HTTP 与 IPv6 直连 TLS（`2400:3200::1:443`）全部通过。
+  - **系统 cron 禁用态尊重与停服还原**：禁用并停止系统 `cron` 后执行 `cron_sync`，保留 `# singsing-ruleset` 计划且不强行开启/拉起 `cron`；停服后 Debian 客户端 `dig @192.168.21.1 www.baidu.com` 恢复 `NOERROR`；还原备份后 4 项基线文件 SHA-256 完全一致。

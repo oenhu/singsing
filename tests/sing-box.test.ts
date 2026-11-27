@@ -284,4 +284,112 @@ describe.skipIf(process.env.SINGSING_VERIFY_CORE !== "1")("sing-box 1.14.4 binar
       f.dispose();
     }
   });
+
+  it("accepts v0.1.3 gateway features (pre-match bypass, geosite-cn, route_exclude_cn, mixed-in, port_mode, block_quic, DoH bootstrap, backup DNS)", () => {
+    const f = serviceApplyFixture();
+    try {
+      const p = blueprintProfile();
+      const node = newNode({
+        tag: "mvp-vless",
+        body: JSON.stringify({
+          type: "vless", server: "proxy.example", server_port: 443, uuid: "025792b0-4e8e-4b76-a999-4f4ac68be9c1",
+        }),
+      });
+      p.nodes = [node];
+      p.settings.defaultMode = "Non-CN";
+      p.settings.proxyDefault = node.id;
+      p.settings.rules = [newRule({ outbound: "proxy", lines: ["domain:force-proxy.example"] })];
+
+      const settings = defaultOpenWrtSettings();
+      settings.dns.localType = "https";
+      settings.dns.localServer = "dns.alidns.com";
+      settings.dns.localPort = 443;
+      settings.dns.localServerName = "dns.alidns.com";
+      settings.dns.localBootstrap = "223.5.5.5";
+      settings.dns.localBackupServer = "119.29.29.29";
+      settings.dns.allowProxyIpv6 = true;
+      settings.tun.ipv6Mode = "direct";
+      settings.tun.strictRoute = false;
+      settings.tun.mtu = 9000;
+      settings.tun.udpTimeout = "5m";
+      settings.tun.routeExcludeCn = true;
+      settings.tun.includeInterface = ["br-lan"];
+      settings.tun.defaultInterface = "pppoe-WAN";
+      settings.mixed = { enabled: true, listenAddress: "::", listenPort: 5330 };
+      settings.routing = {
+        bypassCn: true,
+        cnSiteRuleset: "geosite-cn",
+        portMode: "custom",
+        customPorts: "80,443,8000-8999",
+        blockQuic: true,
+      };
+      settings.paths.cacheFile = join(f.dir, "cache.db");
+      settings.paths.ruleSetDir = f.dir;
+      settings.paths.tailscaleStateRoot = join(f.dir, "tailscale");
+      settings.accessControl = {
+        mode: "blocklist",
+        clients: ["192.168.21.50", "28:75:d8:8a:80:03"],
+        deviceRules: [
+          { id: "dev-1", name: "Workstation", clients: ["28:75:d8:8a:80:03"], outbound: "mvp-vless", enabled: true },
+        ],
+      };
+
+      const generated = generateOpenWrtConfig(p, settings);
+      expect(generated.issues.filter(({ level }) => level === "error")).toEqual([]);
+      writeLocalRuleSets(f.dir, generated.ruleSets);
+      writeCheckedJSON(f.config, generated.config);
+      expect(() => run("check", "-c", f.config)).not.toThrow();
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it.each(["direct", "auto", "ipv4_only"] as const)("accepts tun.ipv6Mode=%s with common port_mode and Tailscale exit node advertised routes", (ipv6Mode) => {
+    const f = serviceApplyFixture();
+    try {
+      const p = blueprintProfile();
+      const node = newNode({
+        tag: "mvp-vless",
+        body: JSON.stringify({
+          type: "vless", server: "proxy.example", server_port: 443, uuid: "025792b0-4e8e-4b76-a999-4f4ac68be9c1",
+        }),
+      });
+      p.nodes = [node];
+      p.settings.defaultMode = "GFWList";
+      p.settings.tailnets = [
+        newTailnet({
+          tag: "hs-exit",
+          endpoint: JSON.stringify({
+            state_directory: "ts-exit",
+            hostname: "openwrt-exit",
+            advertise_exit_node: true,
+            advertise_routes: ["198.51.100.0/24"],
+            exit_node_allow_lan_access: true,
+          }),
+        }),
+      ];
+
+      const settings = defaultOpenWrtSettings();
+      settings.dns.localServer = "223.5.5.5";
+      settings.tun.ipv6Mode = ipv6Mode;
+      settings.routing = {
+        bypassCn: true,
+        cnSiteRuleset: "geosite-cn",
+        portMode: "common",
+        customPorts: "",
+        blockQuic: true,
+      };
+      settings.paths.cacheFile = join(f.dir, "cache.db");
+      settings.paths.ruleSetDir = f.dir;
+      settings.paths.tailscaleStateRoot = join(f.dir, "tailscale");
+
+      const generated = generateOpenWrtConfig(p, settings);
+      expect(generated.issues.filter(({ level }) => level === "error")).toEqual([]);
+      writeLocalRuleSets(f.dir, generated.ruleSets);
+      writeCheckedJSON(f.config, generated.config);
+      expect(() => run("check", "-c", f.config)).not.toThrow();
+    } finally {
+      f.dispose();
+    }
+  });
 });

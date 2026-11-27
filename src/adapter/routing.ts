@@ -209,14 +209,28 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
     for (const ep of config.endpoints as Json[]) {
       if (ep.type !== "tailscale" || ep.advertise_exit_node !== true || typeof ep.tag !== "string") continue;
       tailscaleInboundRules.push({ inbound: ep.tag, port: 53, action: "hijack-dns" });
-      if (ep.exit_node_allow_lan_access !== false) {
-        const advRoutes = Array.isArray(ep.advertise_routes)
-          ? (ep.advertise_routes as string[]).map((x) => x.trim()).filter(Boolean)
-          : [];
+      const allowLan = ep.exit_node_allow_lan_access !== false;
+      const advRoutes = Array.isArray(ep.advertise_routes)
+        ? (ep.advertise_routes as string[]).map((x) => x.trim()).filter(Boolean)
+        : [];
+      if (allowLan && advRoutes.length > 0) {
+        tailscaleInboundRules.push(
+          and(
+            [{ inbound: ep.tag }, or([{ ip_is_private: true }, { ip_cidr: advRoutes }])],
+            { action: "route", outbound: "direct" },
+          ),
+        );
+      } else if (allowLan) {
         tailscaleInboundRules.push({
           inbound: ep.tag,
           ip_is_private: true,
-          ...(advRoutes.length ? { ip_cidr: advRoutes } : {}),
+          action: "route",
+          outbound: "direct",
+        });
+      } else if (advRoutes.length > 0) {
+        tailscaleInboundRules.push({
+          inbound: ep.tag,
+          ip_cidr: advRoutes,
           action: "route",
           outbound: "direct",
         });

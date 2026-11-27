@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { serviceApplyFixture } from "./service-apply-harness";
 
@@ -297,5 +299,34 @@ describe("service-manager WAN integration", () => {
     expect(read(f.events)).toBe("start-previous\n");
     expect(f.run(["wan_ifup", "uplink6"], upstream).status).toBe(0);
     expect(read(f.events)).toBe("start-previous\nstart-previous\n");
+  });
+
+  it("hotplug script reloads on ifup and address/prefix ifupdate while ignoring plain lease renewals", () => {
+    const hotplugSrc = readFileSync(new URL("../root/etc/hotplug.d/iface/95-singsing", import.meta.url), "utf8");
+    const callLog = join(f.dir, "hotplug-calls");
+    const fakeMgr = join(f.dir, "fake-mgr.sh");
+    const testHotplug = join(f.dir, "95-singsing");
+    writeFileSync(fakeMgr, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${callLog}"\n`, { mode: 0o700 });
+    // Run synchronously in test (strip trailing background &) to avoid flaky timing races
+    writeFileSync(
+      testHotplug,
+      hotplugSrc
+        .replace("/usr/share/singsing/service-manager.sh", fakeMgr)
+        .replace(" >/dev/null 2>&1 &", " >/dev/null 2>&1"),
+      { mode: 0o700 },
+    );
+
+    const fire = (env: Record<string, string>) =>
+      spawnSync("sh", [testHotplug], { encoding: "utf8", env: { ...process.env, ...env } });
+
+    expect(fire({ ACTION: "ifdown", INTERFACE: "WAN" }).status).toBe(0);
+    expect(fire({ ACTION: "ifupdate", INTERFACE: "WAN_6" }).status).toBe(0);
+    expect(fire({ ACTION: "ifupdate", INTERFACE: "WAN_6", IFUPDATE_DATA: "1" }).status).toBe(0);
+    expect(existsSync(callLog)).toBe(false);
+
+    expect(fire({ ACTION: "ifup", INTERFACE: "WAN" }).status).toBe(0);
+    expect(fire({ ACTION: "ifupdate", INTERFACE: "WAN_6", IFUPDATE_PREFIXES: "1" }).status).toBe(0);
+    expect(fire({ ACTION: "ifupdate", INTERFACE: "WAN", IFUPDATE_ADDRESSES: "1" }).status).toBe(0);
+    expect(read(callLog)).toBe("wan_ifup WAN\nwan_ifup WAN_6\nwan_ifup WAN\n");
   });
 });
