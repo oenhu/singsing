@@ -953,4 +953,24 @@ describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces
     expect(preMatchStr).not.toContain('"geoip-cn"');
     expect(preMatchStr).toContain('"geosite-cn"');
   });
+
+  it("validates Clash API controller format, port conflicts, and rpcd loopback compatibility", () => {
+    const pBad = blueprintProfile();
+    pBad.settings.clashController = "not-a-controller";
+    expect(validateOpenWrt(pBad, validSettings()).some((i) => i.level === "error" && i.detail.includes("Clash API"))).toBe(true);
+
+    const pConflict = blueprintProfile();
+    pConflict.settings.clashController = "127.0.0.1:5335";
+    expect(validateOpenWrt(pConflict, validSettings()).some((i) => i.level === "error" && i.detail.includes("DNS 监听端口冲突"))).toBe(true);
+
+    const pLan = blueprintProfile();
+    pLan.settings.clashController = "192.168.21.1:9090";
+    const lanIssues = validateOpenWrt(pLan, validSettings());
+    expect(lanIssues.filter((i) => i.level === "error")).toEqual([]);
+    expect(lanIssues.some((i) => i.level === "warning" && i.detail.includes("LuCI 后端代理"))).toBe(true);
+
+    const pWild = blueprintProfile();
+    pWild.settings.clashController = "0.0.0.0:9090";
+    expect(validateOpenWrt(pWild, validSettings()).filter((i) => i.level === "error")).toEqual([]);
+  });
 });

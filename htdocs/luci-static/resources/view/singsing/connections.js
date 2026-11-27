@@ -27,7 +27,8 @@ return view.extend({
 		var renderData = function(res) {
 			latest = res;
 			if (!res || !res.ok || !res.data) {
-				summaryBox.textContent = '当前未连接到 Clash API（请确认 sing-box 正在运行且已开启 Clash API）。';
+				var reason = (res && res.error) ? ('（' + res.error + '）') : '';
+				summaryBox.textContent = '当前未连接到 Clash API' + reason + '。请确认 sing-box 正在运行，并在「基本设置 → 核心与运行设置」填写 Clash API 监听地址（如 127.0.0.1:9090）后保存应用。';
 				tableWrap.innerHTML = '';
 				return;
 			}

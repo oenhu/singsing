@@ -447,6 +447,58 @@ export function validateOpenWrt(profile: Profile, settings: OpenWrtSettings): Is
     resolvedStateDirs.set(fullDir, rawDir);
   }
 
+  // Validate Clash API external_controller format, port conflicts, and LuCI loopback proxy compatibility
+  const clashCtrl = (profile.settings.clashController || "").trim();
+  if (clashCtrl) {
+    const cm = /^\[([^\]]+)\]:([0-9]+)$/.exec(clashCtrl) || /^([^:]*):([0-9]+)$/.exec(clashCtrl);
+    if (!cm) {
+      issues.push({
+        level: "error",
+        section: "settings",
+        detail: `Clash API 监听地址格式无效：${clashCtrl}（示例：127.0.0.1:9090 或 0.0.0.0:9090）`,
+        message: `OpenWrt 设置：Clash API 监听地址格式无效：${clashCtrl}（示例：127.0.0.1:9090 或 0.0.0.0:9090）`,
+      });
+    } else {
+      const host = cm[1].trim().toLowerCase();
+      const port = Number(cm[2]);
+      const hostOk = host === "" || host === "localhost" || isValidIp(host);
+      if (!hostOk || !isValidPort(port)) {
+        issues.push({
+          level: "error",
+          section: "settings",
+          detail: `Clash API 监听地址或端口无效：${clashCtrl}`,
+          message: `OpenWrt 设置：Clash API 监听地址或端口无效：${clashCtrl}`,
+        });
+      } else {
+        if (port === settings.dns.listenPort) {
+          issues.push({
+            level: "error",
+            section: "settings",
+            detail: `Clash API 监听端口 ${port} 与本地 DNS 监听端口冲突`,
+            message: `OpenWrt 设置：Clash API 监听端口 ${port} 与本地 DNS 监听端口冲突`,
+          });
+        }
+        if (settings.mixed?.enabled && port === settings.mixed.listenPort) {
+          issues.push({
+            level: "error",
+            section: "settings",
+            detail: `Clash API 监听端口 ${port} 与 Mixed 代理入站端口冲突`,
+            message: `OpenWrt 设置：Clash API 监听端口 ${port} 与 Mixed 代理入站端口冲突`,
+          });
+        }
+        const rpcdCompatible = host === "" || host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0" || host === "::" || host === "::1";
+        if (!rpcdCompatible) {
+          issues.push({
+            level: "warning",
+            section: "settings",
+            detail: `Clash API 监听地址「${clashCtrl}」不是本机回环或通配地址，LuCI 后端代理将无法连接；建议改用 127.0.0.1:${port} 或 0.0.0.0:${port}`,
+            message: `OpenWrt 设置：Clash API 监听地址「${clashCtrl}」不是本机回环或通配地址，LuCI 后端代理将无法连接；建议改用 127.0.0.1:${port} 或 0.0.0.0:${port}`,
+          });
+        }
+      }
+    }
+  }
+
   // Validate per-device access control outbound targets exist in generated config
   if (settings.accessControl?.deviceRules?.length) {
     const validTargets = new Set<string>(["direct", "proxy"]);

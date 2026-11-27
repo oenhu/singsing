@@ -73,6 +73,35 @@ return view.extend({
 		o.value('error', 'error');
 		o.default = 'info';
 
+		o = s.option(form.Value, '_clash_controller', 'Clash API 监听地址',
+			'保存在当前 Profile 中，用于运行概览动态切换模式/节点、测速与连接管理。推荐 127.0.0.1:9090（仅本机由 LuCI 安全代理）；如需局域网外部面板直连可填 0.0.0.0:9090 或 [::]:9090（请务必设置密钥）；留空则关闭 Clash API。');
+		o.placeholder = '127.0.0.1:9090（留空关闭）';
+		o.cfgvalue = function() {
+			return (profile && profile.settings && typeof profile.settings.clashController === 'string')
+				? profile.settings.clashController : '';
+		};
+		o.write = function(section_id, value) {
+			profile.settings.clashController = String(value || '').trim();
+		};
+		o.remove = function() {
+			profile.settings.clashController = '';
+		};
+
+		o = s.option(form.Value, '_clash_secret', 'Clash API 密钥 (Secret)',
+			'保存在当前 Profile 中，作为 Clash API 的 Bearer 访问密钥（LuCI 后端代理自动附带；监听 0.0.0.0 / [::] 时强烈建议设置强密钥）。');
+		o.password = true;
+		o.placeholder = '留空无认证（建议设置强密钥）';
+		o.cfgvalue = function() {
+			return (profile && profile.settings && typeof profile.settings.clashSecret === 'string')
+				? profile.settings.clashSecret : '';
+		};
+		o.write = function(section_id, value) {
+			profile.settings.clashSecret = String(value || '').trim();
+		};
+		o.remove = function() {
+			profile.settings.clashSecret = '';
+		};
+
 		o = s.option(form.Value, 'cache_file', '缓存数据库路径（cache.db）', '默认存放在内存盘 /tmp 以保护路由器闪存；x86 或外置存储可自定义持久化路径');
 		o.default = '/tmp/singsing/cache.db';
 		o.rmempty = false;

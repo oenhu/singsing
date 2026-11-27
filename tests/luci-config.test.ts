@@ -1065,4 +1065,30 @@ describe("LuCI OpenWrt gateway settings round trip (P0/P1/P2)", () => {
     expect(JSON.stringify(config.route.rules)).toContain("3478:3481");
     expect(config.route.rules.some((r: Rule) => r.action === "reject" && JSON.stringify(r).includes('"udp"') && JSON.stringify(r).includes("443"))).toBe(true);
   });
+
+  it("reads, edits, applies, and clears Clash API controller and secret from settings view", async () => {
+    const p = profile();
+    p.settings.clashController = "";
+    p.settings.clashSecret = "";
+    const h = luci(p);
+
+    const v1 = await h.view("settings");
+    v1.form!.edit("main._clash_controller", "0.0.0.0:9095");
+    v1.form!.edit("main._clash_secret", "my-strong-secret");
+    await v1.view.handleSaveApply();
+
+    const { config: cfg1 } = applied(h);
+    expect(cfg1.experimental.clash_api.external_controller).toBe("0.0.0.0:9095");
+    expect(cfg1.experimental.clash_api.secret).toBe("my-strong-secret");
+
+    // Reopen settings and clear _clash_controller -> disables external_controller
+    const v2 = await h.view("settings");
+    expect(v2.form!.value("main._clash_controller")).toBe("0.0.0.0:9095");
+    expect(v2.form!.value("main._clash_secret")).toBe("my-strong-secret");
+    v2.form!.edit("main._clash_controller", "");
+    await v2.view.handleSaveApply();
+
+    const { config: cfg2 } = applied(h);
+    expect(cfg2.experimental.clash_api.external_controller).toBeUndefined();
+  });
 });

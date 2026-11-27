@@ -121,7 +121,9 @@ return view.extend({
 			clashPanel.innerHTML = '';
 			if (!curSt.running || !liveStats.proxies) {
 				if (curSt.running) {
-					clashPanel.appendChild(E('div', { 'style': 'font-size:12px;opacity:0.75;' }, 'Clash API 未响应（请确认已在 Profile 中开启 127.0.0.1:9090）。'));
+					var errSuffix = liveStats.clashError ? ('（' + liveStats.clashError + '）') : '';
+					clashPanel.appendChild(E('div', { 'style': 'font-size:12px;opacity:0.75;' },
+						'Clash API 未响应' + errSuffix + '。请前往「基本设置 → 核心与运行设置」确认已填写 Clash API 监听地址（例如 127.0.0.1:9090）并保存应用。'));
 				}
 				return;
 			}
@@ -263,6 +265,7 @@ return view.extend({
 				syncControls(st);
 				if (!st.running) {
 					liveStats.proxies = null;
+					liveStats.clashError = '';
 					liveStats.mode = null;
 					liveStats.upSpeed = 0;
 					liveStats.downSpeed = 0;
@@ -278,8 +281,13 @@ return view.extend({
 				]).then(function(r) {
 					if (r[0] && r[0].ok && r[0].data && r[0].data.mode)
 						liveStats.mode = r[0].data.mode;
-					if (r[1] && r[1].ok && r[1].data && r[1].data.proxies)
+					if (r[1] && r[1].ok && r[1].data && r[1].data.proxies) {
 						liveStats.proxies = r[1].data.proxies;
+						liveStats.clashError = '';
+					} else {
+						liveStats.proxies = null;
+						liveStats.clashError = (r[1] && r[1].error) || (r[0] && r[0].error) || '';
+					}
 					if (r[2] && r[2].ok && r[2].data) {
 						var now = Date.now();
 						var up = Number(r[2].data.uploadTotal) || 0;

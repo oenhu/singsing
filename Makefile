@@ -5,7 +5,7 @@ LUCI_DEPENDS:=+luci-base +rpcd +rpcd-mod-ucode +ucode +ucode-mod-fs +ucode-mod-u
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-singsing
-PKG_VERSION:=0.1.4
+PKG_VERSION:=0.1.5
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 
