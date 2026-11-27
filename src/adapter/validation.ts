@@ -1,12 +1,24 @@
 import { nodeObject, tailnetEndpoint, usableGroups, validate as validateUpstream, type Issue } from "../upstream/generate";
 import type { Profile } from "../upstream/types";
 import { parseClientEntries } from "./access";
-import type { DirectDnsType, OpenWrtSettings } from "./types";
+import {
+  COMMON_ROUTING_PORTS,
+  type CnSiteRuleset,
+  type DirectDnsType,
+  type Ipv6Mode,
+  type OpenWrtSettings,
+  type RoutingPortMode,
+} from "./types";
 
 const IPV4_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z]{2,63}$/i;
 const DIRECT_DNS_TYPES: readonly DirectDnsType[] = ["udp", "tcp", "tls", "https"];
-const IFACE_RE = /^[a-zA-Z0-9_-]{1,15}$/;
-const OPENWRT_RESERVED_TAGS = ["dns-in"];
+const IPV6_MODES: readonly Ipv6Mode[] = ["direct", "auto", "ipv4_only"];
+const CN_SITE_RULESETS: readonly CnSiteRuleset[] = ["geosite-cn", "geosite-geolocation-cn"];
+const PORT_MODES: readonly RoutingPortMode[] = ["all", "common", "custom"];
+const IFACE_RE = /^[a-zA-Z0-9_.:-]{1,15}$/;
+const DURATION_RE = /^\d+(ms|s|m|h)$/;
+const OPENWRT_RESERVED_TAGS = ["dns-in", "mixed-in", "local-bootstrap", "local-backup"];
 
 export function isValidIpv4(ip: string): boolean {
   return IPV4_RE.test(ip.trim());
@@ -70,6 +82,11 @@ export function isValidIp(ip: string): boolean {
   return isValidIpv4(ip) || isValidIpv6(ip);
 }
 
+export function isValidHostname(host: string): boolean {
+  const trimmed = host.trim().replace(/\.$/, "");
+  return DOMAIN_RE.test(trimmed) && !isValidIpv4(trimmed);
+}
+
 export function isValidCidr(cidr: string, version: 4 | 6): boolean {
   const parts = cidr.trim().split("/");
   if (parts.length !== 2) return false;
@@ -114,7 +131,64 @@ function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
-/** Validate OpenWrt-specific settings (mandatory direct DNS, loop detection, TUN, paths). */
+export interface ParsedPortSpec {
+  ports: number[];
+  ranges: string[];
+  invalid: string[];
+}
+
+/** Parse comma/whitespace-separated port numbers and `start-end` / `start:end` ranges. */
+export function parseRoutingPorts(raw: string): ParsedPortSpec {
+  const ports: number[] = [];
+  const ranges: string[] = [];
+  const invalid: string[] = [];
+
+  for (const token of (raw || "").split(/[\s,]+/)) {
+    const item = token.trim();
+    if (!item) continue;
+    const rangeMatch = /^(\d+)[-:](\d+)$/.exec(item);
+    if (rangeMatch) {
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+      if (isValidPort(start) && isValidPort(end) && start <= end) {
+        const normalized = `${start}:${end}`;
+        if (!ranges.includes(normalized)) ranges.push(normalized);
+      } else {
+        invalid.push(item);
+      }
+      continue;
+    }
+    if (/^\d+$/.test(item)) {
+      const p = Number(item);
+      if (isValidPort(p)) {
+        if (!ports.includes(p)) ports.push(p);
+      } else {
+        invalid.push(item);
+      }
+      continue;
+    }
+    invalid.push(item);
+  }
+
+  return { ports, ranges, invalid };
+}
+
+function validateDirectIpTarget(
+  label: string,
+  ip: string,
+  routerLanIps: string[] | undefined,
+  err: (detail: string) => void,
+): void {
+  if (!isValidIp(ip)) {
+    err(`${label}「${ip}」必须是有效的 IPv4 或 IPv6 地址`);
+  } else if (isLoopbackOrUnspecified(ip)) {
+    err(`${label}不能设为本地回环或未指定地址（${ip}），否则会导致 DNS 循环`);
+  } else if (routerLanIps?.some((lanIp) => sameIp(lanIp, ip))) {
+    err(`${label}不能设为路由器自身地址（${ip}），否则会导致 dnsmasq 与 sing-box 循环`);
+  }
+}
+
+/** Validate OpenWrt-specific settings (mandatory direct DNS, loop detection, TUN, routing, mixed, paths). */
 export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
   const issues: Issue[] = [];
   const err = (detail: string) =>
@@ -122,27 +196,40 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
   const warn = (detail: string) =>
     issues.push({ level: "warning", detail, message: `OpenWrt 设置：${detail}`, section: "settings" });
 
-  const { dns, tun, paths } = settings;
+  const { dns, tun, paths, mixed, routing } = settings;
 
   if (!DIRECT_DNS_TYPES.includes(dns.localType)) {
     err(`直连上游 DNS 协议必须是 ${DIRECT_DNS_TYPES.join(" / ")} 之一`);
   }
 
   const server = dns.localServer.trim();
+  const bootstrap = (dns.localBootstrap || "").trim();
+  const backup = (dns.localBackupServer || "").trim();
+  const encryptedDirect = dns.localType === "tls" || dns.localType === "https";
+
   if (!server) {
     err("必须手动填写直连上游 DNS 地址（如 223.5.5.5、119.29.29.29 等），未填写禁止应用与启动");
-  } else if (!isValidIp(server)) {
+  } else if (isValidIp(server)) {
+    validateDirectIpTarget("直连上游 DNS", server, settings.routerLanIps, err);
+  } else if (encryptedDirect && isValidHostname(server)) {
+    if (!bootstrap) {
+      err(`直连上游 DNS「${server}」为域名时，必须填写 IPv4 或 IPv6 引导解析 DNS IP（避免引导解析循环）`);
+    }
+  } else {
     err(`直连上游 DNS「${server}」必须是有效的 IPv4 或 IPv6 地址（不可填域名，避免引导解析循环）`);
-  } else if (isLoopbackOrUnspecified(server)) {
-    err(`直连上游 DNS 不能设为本地回环或未指定地址（${server}），否则会导致 DNS 循环`);
-  } else if (settings.routerLanIps?.some((lanIp) => sameIp(lanIp, server))) {
-    err(`直连上游 DNS 不能设为路由器自身地址（${server}），否则会导致 dnsmasq 与 sing-box 循环`);
+  }
+
+  if (bootstrap) {
+    validateDirectIpTarget("直连 DNS 引导解析 IP", bootstrap, settings.routerLanIps, err);
+  }
+  if (backup) {
+    validateDirectIpTarget("备用直连 DNS", backup, settings.routerLanIps, err);
   }
 
   if (!isValidPort(dns.localPort)) {
     err(`直连上游 DNS 端口无效：${dns.localPort}`);
   }
-  if ((dns.localType === "tls" || dns.localType === "https") && !dns.localServerName.trim()) {
+  if (encryptedDirect && isValidIp(server) && !dns.localServerName.trim()) {
     warn(`使用 ${dns.localType.toUpperCase()} 加密直连 DNS 时建议填写 TLS Server Name（SNI）`);
   }
 
@@ -166,8 +253,14 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
     if (tun.ipv6 && !isValidCidr(tun.addressV6.trim(), 6)) {
       err(`TUN IPv6 网段格式无效：${tun.addressV6}`);
     }
+    if (tun.ipv6Mode && !IPV6_MODES.includes(tun.ipv6Mode)) {
+      err(`IPv6 策略无效：${tun.ipv6Mode}`);
+    }
     if (tun.mtu !== null && (!Number.isInteger(tun.mtu) || tun.mtu < 576 || tun.mtu > 65535)) {
       err(`TUN MTU 必须是 576-65535 之间的整数`);
+    }
+    if (tun.udpTimeout && tun.udpTimeout.trim() && !DURATION_RE.test(tun.udpTimeout.trim())) {
+      err(`TUN UDP 超时「${tun.udpTimeout}」格式无效，例如 5m、300s`);
     }
     if (tun.autoRedirect && !tun.autoRoute) {
       err("开启 Auto Redirect 时必须同时开启 Auto Route（sing-box 原生要求）");
@@ -177,6 +270,49 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
       if (!trimmed) continue;
       if (!isValidCidr(trimmed, 4) && !isValidCidr(trimmed, 6)) {
         err(`TUN 绕过网段格式无效（需为 IPv4 或 IPv6 CIDR）：${trimmed}`);
+      }
+    }
+    for (const ifc of tun.includeInterface || []) {
+      const trimmed = ifc.trim();
+      if (!trimmed) continue;
+      if (!IFACE_RE.test(trimmed)) {
+        err(`TUN 监听接口名称无效：${trimmed}`);
+      }
+    }
+    if (tun.defaultInterface && tun.defaultInterface.trim() && !IFACE_RE.test(tun.defaultInterface.trim())) {
+      err(`绑定出站 WAN 接口名称无效：${tun.defaultInterface}`);
+    }
+  }
+
+  if (mixed?.enabled) {
+    if (!isValidIp(mixed.listenAddress.trim())) {
+      err(`Mixed 代理入站监听地址无效：${mixed.listenAddress}`);
+    }
+    if (!isValidPort(mixed.listenPort)) {
+      err(`Mixed 代理入站端口无效：${mixed.listenPort}`);
+    }
+    if (mixed.listenPort === dns.listenPort && sameIp(mixed.listenAddress, dns.listenAddress)) {
+      err(`Mixed 代理入站端口（${mixed.listenPort}）与 DNS 监听端口冲突`);
+    }
+  }
+
+  if (routing) {
+    if (!CN_SITE_RULESETS.includes(routing.cnSiteRuleset)) {
+      err(`国内域名规则集选项无效：${routing.cnSiteRuleset}`);
+    }
+    if (!PORT_MODES.includes(routing.portMode)) {
+      err(`代理端口范围模式无效：${routing.portMode}`);
+    } else if (routing.portMode === "custom") {
+      const parsed = parseRoutingPorts(routing.customPorts || "");
+      if (parsed.invalid.length > 0) {
+        err(`自定义代理端口格式无效：${parsed.invalid.join("、")}`);
+      } else if (parsed.ports.length === 0 && parsed.ranges.length === 0) {
+        err("已选择「自定义代理端口」，请至少填写一个端口或端口段（例如 80,443,8000-8999）");
+      }
+    } else if (routing.portMode === "common") {
+      const parsed = parseRoutingPorts(COMMON_ROUTING_PORTS);
+      if (parsed.ports.length === 0 && parsed.ranges.length === 0) {
+        err("常用代理端口列表为空");
       }
     }
   }

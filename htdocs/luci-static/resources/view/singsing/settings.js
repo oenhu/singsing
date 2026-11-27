@@ -9,12 +9,15 @@ return view.extend({
 	load: function() {
 		return Promise.all([
 			uci.load('singsing'),
-			api.loadActiveProfile()
+			api.loadActiveProfile(),
+			api.status().catch(function() { return {}; })
 		]);
 	},
 
 	render: function(data) {
 		var loaded = data[1];
+		var statusInfo = data[2] || {};
+		var wanDnsList = Array.isArray(statusInfo.wan_dns) ? statusInfo.wan_dns : [];
 		var profile = loaded.profile;
 		var engine = loaded.engine;
 		var m, s, o;
@@ -37,13 +40,13 @@ return view.extend({
 		o.default = '/usr/bin/sing-box';
 		o.rmempty = false;
 
-		o = s.option(form.ListValue, '_default_mode', '默认分流模式', '保存在当前 Profile 中，保留原项目 4 种完整分流策略');
+		o = s.option(form.ListValue, '_default_mode', '默认分流模式', '保存在当前 Profile 中，保留原项目 4 种完整分流策略（推荐 Non-CN 绕过中国大陆）');
+		o.value('Non-CN', 'Non-CN（国内域名/IP 绕过直连，其余走代理，保留并行 DNS 竞速）');
 		o.value('GFWList', 'GFWList（仅 GFWList 与自定义代理走代理）');
-		o.value('Non-CN', 'Non-CN（国内域名/IP 直连，其余走代理，保留并行 DNS 竞速）');
 		o.value('Global', 'Global（除局域网等必要例外外全部走代理）');
 		o.value('Direct', 'Direct（未命中自定义规则的流量直连）');
 		o.cfgvalue = function() {
-			return (profile && profile.settings && profile.settings.defaultMode) || 'GFWList';
+			return (profile && profile.settings && profile.settings.defaultMode) || 'Non-CN';
 		};
 		o.write = function(section_id, value) {
 			profile.settings.defaultMode = value;
@@ -76,6 +79,14 @@ return view.extend({
 		o = s.option(form.Value, 'ruleset_download_prefix', '规则集下载加速前缀（可选）', '例如 https://ghfast.top/ ；用于首次无代理时自动下载 GitHub 规则集，留空则直连 GitHub');
 		o.placeholder = '留空直连 GitHub';
 
+		o = s.option(form.Flag, 'ruleset_auto_update', '定时自动更新本地规则集', '启用后使用 OpenWrt 系统 crond 按计划自动更新已配置的本地规则集（仅在服务启用时生效）');
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'ruleset_update_cron', '规则集更新计划（Cron）', '标准 5 字段 Cron 表达式，默认每天凌晨 4 点（0 4 * * *）');
+		o.default = '0 4 * * *';
+		o.depends('ruleset_auto_update', '1');
+
 		o = s.option(form.Value, 'tailscale_state_root', 'Tailscale 状态持久化目录', '必须位于闪存持久化目录，防止重启后丢失 Tailscale 登录凭证');
 		o.default = '/etc/sing-box/tailscale';
 		o.rmempty = false;
@@ -104,9 +115,10 @@ return view.extend({
 			}
 		};
 
+		var wanHint = wanDnsList.length ? (' 当前检测到的 WAN DNS：' + wanDnsList.join('、') + '。') : '';
 		o = s.taboption('direct', form.Value, 'local_server', '上游 DNS 地址（必填）',
-			'不使用 WAN 自动 DNS；仅支持 IPv4/IPv6（不可填域名或 127.0.0.1 / 路由器 LAN IP）。参考：阿里 223.5.5.5、DNSPod 119.29.29.29、114 114.114.114.114、Cloudflare 1.1.1.1、Google 8.8.8.8。');
-		o.placeholder = '例如 223.5.5.5';
+			'支持 IPv4/IPv6（不可填 127.0.0.1 或路由器 LAN IP）；DoT/DoH 如填域名请同时填写下方引导解析 IP。' + wanHint + '参考：阿里 223.5.5.5、DNSPod 119.29.29.29。');
+		o.placeholder = wanDnsList[0] || '例如 223.5.5.5';
 		o.rmempty = false;
 
 		o = localPortOption = s.taboption('direct', form.Value, 'local_port', '上游 DNS 端口', '留空使用协议默认端口：UDP / TCP 为 53，DoT 为 853，DoH 为 443。');
@@ -120,6 +132,14 @@ return view.extend({
 		o = s.taboption('direct', form.Value, 'local_path', 'DoH 路径', '仅 DoH 协议需要填写');
 		o.default = '/dns-query';
 		o.depends('local_type', 'https');
+
+		o = s.taboption('direct', form.Value, 'local_bootstrap', '引导解析 DNS IP（域名模式必填）', '当 DoT/DoH 上游填写域名（如 dns.alidns.com）时，用于解析该域名的直连 IP（如 223.5.5.5）');
+		o.placeholder = wanDnsList[0] || '例如 223.5.5.5';
+		o.depends('local_type', 'tls');
+		o.depends('local_type', 'https');
+
+		o = s.taboption('direct', form.Value, 'local_backup_server', '备用直连 DNS IP（可选）', '主直连 DNS 超时或返回 SERVFAIL/REFUSED 时自动回退的备用 IPv4/IPv6（留空禁用）');
+		o.placeholder = '例如 119.29.29.29';
 
 		o = s.taboption('local', form.Value, 'listen_address', 'sing-box DNS 监听地址');
 		o.default = '127.0.0.1';
@@ -188,6 +208,10 @@ return view.extend({
 			profile.settings.clientSubnet = '';
 		};
 
+		o = s.taboption('remote', form.Flag, 'allow_proxy_ipv6', '允许代理域名返回 IPv6 记录', '默认关闭（推荐，避免无 IPv6 节点下 TUN 假连通）；仅在代理节点全部支持双栈 IPv6 时开启');
+		o.default = '0';
+		o.rmempty = false;
+
 		// ---------------------------------------------------------------
 		// 3. 透明代理（TUN + Auto Redirect）
 		s = m.section(form.NamedSection, 'tun', 'tun', '透明代理（TUN）');
@@ -204,7 +228,7 @@ return view.extend({
 		o.default = '172.19.0.1/30';
 		o.rmempty = false;
 
-		o = s.option(form.Flag, 'ipv6', '启用 IPv6 接管', '保留原项目精细化 IPv6 DNS 策略，同时通过 TUN 接管客户端直连 IPv6 流量');
+		o = s.option(form.Flag, 'ipv6', '启用 IPv6 接管', '通过 TUN 接管客户端 IPv6 流量（直连 IPv6 行为由下方 IPv6 策略控制）');
 		o.default = '1';
 		o.rmempty = false;
 
@@ -212,21 +236,31 @@ return view.extend({
 		o.default = 'fdfe:dcba:9876::1/126';
 		o.depends('ipv6', '1');
 
+		o = s.option(form.ListValue, 'ipv6_mode', '路由器直连 IPv6 策略', '解决 PPPoE/IPv6 PD 场景下默认网卡无公网 IPv6 地址导致的直连 IPv6 误杀');
+		o.value('direct', '直连启用 IPv6（推荐，适配 PPPoE / IPv6 PD）');
+		o.value('auto', '自动检测默认网卡公网 IPv6（上游默认）');
+		o.value('ipv4_only', '仅 IPv4（无公网 IPv6 宽带，直连清空 AAAA）');
+		o.default = 'direct';
+
 		o = s.option(form.Flag, 'auto_route', 'Auto Route', '自动配置系统路由表');
 		o.default = '1';
 		o.rmempty = false;
 
-		o = s.option(form.Flag, 'auto_redirect', 'Auto Redirect', '使用 sing-box 原生 nftables 规则自动重定向流量（需同时开启 Auto Route）');
+		o = s.option(form.Flag, 'auto_redirect', 'Auto Redirect', '使用 sing-box 原生 nftables 规则自动重定向并支持内核级 Pre-Match Bypass（需同时开启 Auto Route）');
 		o.default = '1';
 		o.rmempty = false;
 
-		o = s.option(form.Flag, 'strict_route', 'Strict Route');
-		o.default = '1';
+		o = s.option(form.Flag, 'strict_route', 'Strict Route', 'OpenWrt 路由器默认关闭，避免与多 WAN、IPTV 或 SO_BINDTODEVICE 本地服务冲突');
+		o.default = '0';
 		o.rmempty = false;
 
-		o = s.option(form.Value, 'mtu', 'MTU（可选）', '留空使用 sing-box 核心默认值');
+		o = s.option(form.Value, 'mtu', 'MTU（可选）', '推荐 9000 减少用户态拷贝开销；留空使用 sing-box 核心默认值');
 		o.datatype = 'range(576,65535)';
-		o.placeholder = '留空使用核心默认';
+		o.default = '9000';
+		o.placeholder = '9000';
+
+		o = s.option(form.Value, 'udp_timeout', 'UDP NAT 超时（可选）', '例如 5m、300s；留空使用 sing-box 默认值（5m）');
+		o.placeholder = '例如 5m';
 
 		o = s.option(form.Value, 'route_exclude_address', '绕过 TUN 的网段（可选）', '从 TUN 自动路由中排除的 IPv4/IPv6 CIDR 网段，多个用逗号分隔（例如 192.168.100.0/24, 10.8.0.0/16）');
 		o.placeholder = '例如 192.168.100.0/24';
@@ -241,6 +275,60 @@ return view.extend({
 			}
 			return true;
 		};
+
+		o = s.option(form.Flag, 'route_exclude_cn', '路由表级绕过中国大陆 IP（高级性能模式）', '将 geoip-cn 写入 route_exclude_address_set，中国大陆 IP 连 pre-match 都不进；注意：开启后热切到 Global 模式时国内 IP 仍直连');
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'include_interface', '仅监听指定 LAN 接口（可选）', '限制 TUN 仅接管指定接口流量（如 br-lan），避免误接管访客网或 IPTV VLAN，多个用逗号分隔');
+		o.placeholder = '留空接管全部接口（如 br-lan）';
+
+		o = s.option(form.Value, 'default_interface', '绑定出站 WAN 接口（可选）', '多 WAN 环境下显式指定默认出站物理/逻辑接口（如 pppoe-wan），留空使用 auto_detect_interface');
+		o.placeholder = '留空自动检测（如 pppoe-wan）';
+
+		// ---------------------------------------------------------------
+		// 4. 网关 Bypass 与流量边界
+		s = m.section(form.NamedSection, 'routing', 'routing', '网关内核 Bypass 与流量边界');
+
+		o = s.option(form.Flag, 'bypass_cn', '启用内核级 Pre-Match Bypass', '在 Auto Redirect 下为中国大陆、私网、直连列表、黑/白名单设备与非代理端口生成原生 action: bypass，免进 sing-box 用户态并保留 4 模式热切换');
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.ListValue, 'cn_site_ruleset', '国内域名规则集', '控制 Non-CN 与大陆绕过使用的国内站点集合');
+		o.value('geosite-cn', 'geosite-cn（含 Apple/Microsoft/国内 CDN，推荐）');
+		o.value('geosite-geolocation-cn', 'geosite-geolocation-cn（上游默认，仅中国大陆站点）');
+		o.default = 'geosite-cn';
+
+		o = s.option(form.ListValue, 'port_mode', '代理目的端口范围', '绕过非代理端口可避免 BT/PT/游戏 P2P 大流量进入代理或用户态');
+		o.value('all', '全部端口');
+		o.value('common', '仅常用端口（20-25,53,80,443,8080,8443 等）');
+		o.value('custom', '自定义端口 / 端口段');
+		o.default = 'all';
+
+		o = s.option(form.Value, 'custom_ports', '自定义代理端口', '逗号分隔端口或端口段（例如 80,443,8000-8999）');
+		o.placeholder = '例如 80,443,8000-8999';
+		o.depends('port_mode', 'custom');
+
+		o = s.option(form.Flag, 'block_quic', '阻断代理流量的 QUIC（UDP 443）', '仅对走代理的海外 UDP 443 返回拒绝以回退 TCP/TLS，不影响微信/B站等国内 QUIC');
+		o.default = '0';
+		o.rmempty = false;
+
+		// ---------------------------------------------------------------
+		// 5. 局域网 Mixed 代理入站（可选）
+		s = m.section(form.NamedSection, 'mixed', 'mixed', '局域网代理入站（Mixed HTTP / SOCKS5）');
+
+		o = s.option(form.Flag, 'enabled', '启用 Mixed 混合代理入站', '提供局域网 HTTP + SOCKS5 代理端口（mixed-in），方便未走透明代理的设备或工具手动接入');
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'listen_address', '监听地址');
+		o.default = '::';
+		o.depends('enabled', '1');
+
+		o = s.option(form.Value, 'listen_port', '监听端口');
+		o.datatype = 'port';
+		o.default = '5330';
+		o.depends('enabled', '1');
 
 		return m.render().then(function(mapEl) {
 			// 4. 自定义分域 DNS 解析规则

@@ -5,8 +5,17 @@ export * from "./validation";
 export { buildDirectDnsServer, adaptDns } from "./dns";
 export { adaptTun } from "./tun";
 export { adaptRuleSets } from "./rulesets";
-export { adaptAccessControl, parseClientEntries, isValidMac, normalizeMac } from "./access";
-export { generateOpenWrtConfig } from "./config";
+export {
+  adaptAccessControl,
+  buildClientMatch,
+  buildPostSniffAccessControlRules,
+  hasMacAccessControl,
+  parseClientEntries,
+  isValidMac,
+  normalizeMac,
+} from "./access";
+export { adaptRouting } from "./routing";
+export { generateOpenWrtConfig, openWrtBlueprintProfile } from "./config";
 
 // Re-export upstream core capabilities for LuCI views (without React/DOM dependencies).
 export {

@@ -48,7 +48,7 @@ export function parseClientEntries(entries: string[]): ParsedClients {
 }
 
 /** Build a sing-box matcher for source IPs and/or source MACs (using logical OR when both exist). */
-function buildClientMatch(cidrs: string[], macs: string[], invert = false): Json | null {
+export function buildClientMatch(cidrs: string[], macs: string[], invert = false): Json | null {
   const parts: Json[] = [];
   if (cidrs.length > 0) parts.push({ source_ip_cidr: cidrs });
   if (macs.length > 0) parts.push({ source_mac_address: macs });
@@ -65,16 +65,30 @@ function buildClientMatch(cidrs: string[], macs: string[], invert = false): Json
   };
 }
 
-/**
- * Inject sing-box 1.14+ native client access control rules into `config.route.rules`
- * right after `ip_is_private: true -> direct` so DNS hijack and LAN-to-LAN access remain intact.
- */
-export function adaptAccessControl(config: Json, settings: OpenWrtSettings): void {
-  const ac: OpenWrtAccessControl | undefined = settings.accessControl;
-  if (!ac) return;
+/** Whether any active client access control or device rule uses MAC matching. */
+export function hasMacAccessControl(ac: OpenWrtAccessControl | undefined): boolean {
+  if (!ac) return false;
+  if (ac.mode !== "all" && parseClientEntries(ac.clients || []).macs.length > 0) {
+    return true;
+  }
+  for (const dr of ac.deviceRules || []) {
+    if (dr.enabled === false) continue;
+    if ((dr.outbound || "").trim() && parseClientEntries(dr.clients || []).macs.length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
-  const route = config.route as { rules?: Json[] } | undefined;
-  if (!route || !Array.isArray(route.rules)) return;
+/**
+ * Build normal-path (post-sniff) client access control route rules.
+ * Placed after `ip_is_private -> direct` and BEFORE custom domain/IP rules (`s.rules`) so
+ * blocklisted / non-allowlisted devices never get hijacked by user domain rules while
+ * LAN-to-LAN traffic always remains reachable.
+ */
+export function buildPostSniffAccessControlRules(settings: OpenWrtSettings): Json[] {
+  const ac = settings.accessControl;
+  if (!ac) return [];
 
   const injected: Json[] = [];
 
@@ -109,7 +123,6 @@ export function adaptAccessControl(config: Json, settings: OpenWrtSettings): voi
         outbound: "direct",
       });
     } else {
-      // Empty allowlist: all TUN client traffic goes direct (matches validation warning)
       injected.push({
         inbound: "tun-in",
         action: "route",
@@ -118,9 +131,24 @@ export function adaptAccessControl(config: Json, settings: OpenWrtSettings): voi
     }
   }
 
+  return injected;
+}
+
+/**
+ * Inject client access control rules into `config.route.rules` and configure native
+ * neighbor lookup (`find_neighbor` + `dhcp_lease_files`) when MAC selectors are present.
+ */
+export function adaptAccessControl(config: Json, settings: OpenWrtSettings): void {
+  const route = config.route as { rules?: Json[]; find_neighbor?: boolean; dhcp_lease_files?: string[] } | undefined;
+  if (!route || !Array.isArray(route.rules)) return;
+
+  if (hasMacAccessControl(settings.accessControl)) {
+    route.find_neighbor = true;
+  }
+
+  const injected = buildPostSniffAccessControlRules(settings);
   if (injected.length === 0) return;
 
-  // Insert right after `{ ip_is_private: true, action: "route", outbound: "direct" }`
   const privIdx = route.rules.findIndex(
     (r) => r.ip_is_private === true && r.action === "route" && r.outbound === "direct",
   );

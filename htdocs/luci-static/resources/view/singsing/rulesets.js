@@ -5,8 +5,9 @@
 
 var BUILTIN_DESCRIPTIONS = {
 	'gfwlist': 'GFWList 分流模式内置规则集',
+	'geosite-cn': 'Non-CN 与大陆绕过模式国内域名规则集（含国内 CDN）',
 	'geosite-geolocation-cn': 'Non-CN 分流模式国内域名规则集',
-	'geoip-cn': 'Non-CN 分流模式与 IPv6 策略国内 IP 规则集'
+	'geoip-cn': 'Non-CN 分流模式、大陆 Bypass 与 IPv6 策略国内 IP 规则集'
 };
 
 function formatBytes(n) {

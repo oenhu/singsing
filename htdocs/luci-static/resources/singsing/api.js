@@ -189,32 +189,39 @@ function readOpenWrtSettings(lanIps) {
 		var bool = function(sec, opt, def) {
 			return get(sec, opt, def ? '1' : '0') === '1';
 		};
-		var dnsPort = function(opt, def) {
-			var value = String(get('dns', opt, def));
+		var portNum = function(sec, opt, def) {
+			var value = String(get(sec, opt, def));
 			return /^\d+$/.test(value) ? Number(value) : NaN;
+		};
+		var splitList = function(raw) {
+			if (Array.isArray(raw))
+				return raw.map(function(x) { return String(x || '').trim(); }).filter(Boolean);
+			if (typeof raw === 'string' && raw.trim())
+				return raw.split(/[\s,]+/).map(function(x) { return x.trim(); }).filter(Boolean);
+			return [];
 		};
 		var localType = get('dns', 'local_type', 'udp');
 		var mtuRaw = uci.get('singsing', 'tun', 'mtu');
-		var mtu = (mtuRaw && /^\d+$/.test(String(mtuRaw).trim())) ? parseInt(mtuRaw, 10) : null;
-		var exRaw = uci.get('singsing', 'tun', 'route_exclude_address');
-		var routeExcludes = [];
-		if (Array.isArray(exRaw)) {
-			routeExcludes = exRaw.map(function(x) { return String(x || '').trim(); }).filter(Boolean);
-		} else if (typeof exRaw === 'string' && exRaw.trim()) {
-			routeExcludes = exRaw.split(/[\s,]+/).map(function(x) { return x.trim(); }).filter(Boolean);
-		}
+		var mtu = (mtuRaw === undefined || mtuRaw === null)
+			? 9000
+			: ((String(mtuRaw).trim() && /^\d+$/.test(String(mtuRaw).trim())) ? parseInt(mtuRaw, 10) : null);
+		var routeExcludes = splitList(uci.get('singsing', 'tun', 'route_exclude_address'));
+		var includeInterfaces = splitList(uci.get('singsing', 'tun', 'include_interface'));
 
 		return {
 			dns: {
 				localType: localType,
 				localServer: get('dns', 'local_server', ''),
-				localPort: dnsPort('local_port', engine.defaultPortForDnsType(localType)),
+				localPort: portNum('dns', 'local_port', engine.defaultPortForDnsType(localType)),
 				localServerName: get('dns', 'local_server_name', ''),
 				localPath: get('dns', 'local_path', '/dns-query'),
+				localBootstrap: get('dns', 'local_bootstrap', ''),
+				localBackupServer: get('dns', 'local_backup_server', ''),
 				listenAddress: get('dns', 'listen_address', '127.0.0.1'),
-				listenPort: dnsPort('listen_port', 5335),
+				listenPort: portNum('dns', 'listen_port', 5335),
 				hijack: bool('dns', 'hijack', true),
-				dnsmasqManage: bool('dns', 'dnsmasq_manage', true)
+				dnsmasqManage: bool('dns', 'dnsmasq_manage', true),
+				allowProxyIpv6: bool('dns', 'allow_proxy_ipv6', false)
 			},
 			tun: {
 				enabled: bool('tun', 'enabled', true),
@@ -223,10 +230,27 @@ function readOpenWrtSettings(lanIps) {
 				addressV6: get('tun', 'address_v6', 'fdfe:dcba:9876::1/126'),
 				autoRoute: bool('tun', 'auto_route', true),
 				autoRedirect: bool('tun', 'auto_redirect', true),
-				strictRoute: bool('tun', 'strict_route', true),
+				strictRoute: bool('tun', 'strict_route', false),
 				ipv6: bool('tun', 'ipv6', true),
+				ipv6Mode: get('tun', 'ipv6_mode', 'direct'),
 				mtu: mtu,
-				routeExcludeAddress: routeExcludes
+				udpTimeout: get('tun', 'udp_timeout', ''),
+				routeExcludeAddress: routeExcludes,
+				routeExcludeCn: bool('tun', 'route_exclude_cn', false),
+				includeInterface: includeInterfaces,
+				defaultInterface: get('tun', 'default_interface', '')
+			},
+			mixed: {
+				enabled: bool('mixed', 'enabled', false),
+				listenAddress: get('mixed', 'listen_address', '::'),
+				listenPort: portNum('mixed', 'listen_port', 5330)
+			},
+			routing: {
+				bypassCn: bool('routing', 'bypass_cn', true),
+				cnSiteRuleset: get('routing', 'cn_site_ruleset', 'geosite-cn'),
+				portMode: get('routing', 'port_mode', 'all'),
+				customPorts: get('routing', 'custom_ports', ''),
+				blockQuic: bool('routing', 'block_quic', false)
 			},
 			paths: {
 				cacheFile: get('main', 'cache_file', '/tmp/singsing/cache.db'),
@@ -246,8 +270,10 @@ function loadActiveProfile() {
 		return callGetProfile(name).then(function(pRes) {
 			if (!pRes || pRes.ok !== true)
 				throw new Error('读取配置方案「' + name + '」失败：' + ((pRes && pRes.error) || 'RPC 未返回有效结果'));
-			if (pRes.exists === false)
-				return { name: name, profile: engine.blueprintProfile(), engine: engine };
+			if (pRes.exists === false) {
+				var fresh = engine.openWrtBlueprintProfile ? engine.openWrtBlueprintProfile() : engine.blueprintProfile();
+				return { name: name, profile: fresh, engine: engine };
+			}
 			try {
 				return { name: name, profile: engine.normalizeProfile(pRes.profile), engine: engine };
 			} catch (e) {

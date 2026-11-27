@@ -115,13 +115,17 @@ describe("LuCI client access control", () => {
     const { config } = applied(h);
     expect(config).toEqual(preview);
     const rules: Rule[] = config.route.rules;
-    const explicit = rules.findIndex((rule) => rule.domain?.includes("ordinary.example"));
-    const privateDirect = rules.findIndex((rule) => rule.ip_is_private && rule.outbound === "direct");
-    const modeFallback = rules.findIndex((rule) => rule.clash_mode === "Direct");
+    const sniffIdx = rules.findIndex((rule) => rule.action === "sniff");
+    expect(sniffIdx).toBeGreaterThan(0);
+    const postSniff = rules.slice(sniffIdx);
+    const explicit = postSniff.findIndex((rule) => rule.domain?.includes("ordinary.example"));
+    const privateDirect = postSniff.findIndex((rule) => rule.ip_is_private && rule.outbound === "direct");
+    const customDirect = postSniff.findIndex((rule) => JSON.stringify(rule).includes("custom-direct-domains"));
     expect(rules[0]).toEqual({ inbound: "dns-in", action: "hijack-dns" });
-    expect(explicit).toBeGreaterThan(0);
-    expect(privateDirect).toBeGreaterThan(explicit);
-    expect(rules.slice(privateDirect + 1, modeFallback)).toEqual([
+    expect(config.route.find_neighbor).toBe(true);
+    expect(privateDirect).toBeGreaterThan(0);
+    expect(explicit).toBeGreaterThan(privateDirect);
+    expect(postSniff.slice(privateDirect + 1, customDirect)).toEqual([
       { source_ip_cidr: ["192.168.21.50/32", "2001:db8:21::50/128"], action: "route", outbound: "office-group" },
       { source_ip_cidr: ["192.168.21.50/32"], action: "route", outbound: "existing" },
       {
@@ -132,6 +136,9 @@ describe("LuCI client access control", () => {
         ],
       },
     ]);
+    // Pre-match rules also emit kernel bypass for the blocklist before sniff
+    const preMatch = rules.slice(1, sniffIdx);
+    expect(preMatch.some((r) => r.action === "bypass" && JSON.stringify(r).includes("02:00:00:00:00:50"))).toBe(true);
   });
 
   it("reports an invalid device selector before saving or applying it", async () => {
@@ -1015,5 +1022,39 @@ describe("LuCI overview generate-before-enable flow", () => {
 
     expect(h.calls.some(({ method }) => method === "apply_config")).toBe(true);
     expect(h.calls.some(({ method }) => method === "write_config")).toBe(false);
+  });
+});
+
+describe("LuCI OpenWrt gateway settings round trip (P0/P1/P2)", () => {
+  it("saves and applies bypass, port filter, QUIC block, IPv6 mode, mixed-in, interface binding, and backup DNS", async () => {
+    const h = luci(profile());
+    const initial = await h.view("settings");
+    initial.form!.edit("dns.local_backup_server", "119.29.29.29");
+    initial.form!.edit("tun.ipv6_mode", "ipv4_only");
+    initial.form!.edit("tun.include_interface", "br-lan");
+    initial.form!.edit("tun.default_interface", "pppoe-wan");
+    initial.form!.edit("tun.route_exclude_cn", "1");
+    initial.form!.edit("routing.port_mode", "common");
+    initial.form!.edit("routing.block_quic", "1");
+    initial.form!.edit("mixed.enabled", "1");
+    initial.form!.edit("mixed.listen_port", "5331");
+    await initial.view.handleSaveApply();
+
+    const { config } = applied(h);
+    expect(config.dns.servers).toContainEqual(expect.objectContaining({ tag: "local-backup", server: "119.29.29.29" }));
+    expect(config.inbounds).toContainEqual(expect.objectContaining({
+      tag: "tun-in",
+      include_interface: ["br-lan"],
+      route_exclude_address_set: ["geoip-cn"],
+      strict_route: false,
+    }));
+    expect(config.inbounds).toContainEqual(expect.objectContaining({
+      tag: "mixed-in",
+      listen_port: 5331,
+    }));
+    expect(config.route.default_interface).toBe("pppoe-wan");
+    expect(config.route.auto_detect_interface).toBeUndefined();
+    expect(config.route.rules.some((r: Rule) => r.action === "bypass")).toBe(true);
+    expect(config.route.rules.some((r: Rule) => r.action === "reject" && JSON.stringify(r).includes('"udp"') && JSON.stringify(r).includes("443"))).toBe(true);
   });
 });

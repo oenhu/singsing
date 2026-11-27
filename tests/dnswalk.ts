@@ -65,7 +65,7 @@ function leaf(rule: Json, q: Query): Tri {
               ? !!q.gfw
               : s === "gfwlist-custom-domains"
                 ? !!q.customProxy
-              : s === "geosite-geolocation-cn"
+              : s === "geosite-geolocation-cn" || s === "geosite-cn"
                 ? !!q.cnSite
                 : s === "custom-direct-domains"
                   ? !!q.customDirect

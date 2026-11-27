@@ -19,6 +19,9 @@ TMP_NEW_CONFIG="$TMP_DIR/config.new.json"
 TMP_DL_DIR="$TMP_DIR/downloads"
 LOCK_FILE="$TMP_DIR/apply.lock"
 TX_FILE="$TMP_DIR/transaction.state"
+CRON_FILE="/etc/crontabs/root"
+CRON_LOCK="/var/lock/root-crontab"
+CRON_TAG="# singsing-ruleset"
 
 uci_get() {
 	uci -q get "singsing.$1" 2>/dev/null || printf '%s' "${2:-}"
@@ -83,15 +86,19 @@ wait_port_listening() {
 }
 
 check_local_dns() {
-	local srv=""
+	local srv="" ltype="" bootstrap=""
 	if [ "$#" -gt 0 ]; then
 		srv="$1"
+		ltype="${2:-$(uci_get "dns.local_type" "udp")}"
+		bootstrap="${3:-$(uci_get "dns.local_bootstrap" "")}"
 	else
 		srv="$(uci_get "dns.local_server" "")"
+		ltype="$(uci_get "dns.local_type" "udp")"
+		bootstrap="$(uci_get "dns.local_bootstrap" "")"
 	fi
 	[ -n "$srv" ] || return 1
 
-	DNS_SRV="$srv" ucode -e '
+	DNS_SRV="$srv" DNS_TYPE="$ltype" DNS_BOOTSTRAP="$bootstrap" ucode -e '
 		import { popen } from "fs";
 
 		function isV4(ip) {
@@ -140,9 +147,25 @@ check_local_dns() {
 			return length(left) == 8 ? left : null;
 		}
 
-		let s = lc(trim(getenv("DNS_SRV") || ""));
+		function isHost(h) {
+			let d = replace(lc(trim(h || "")), /\.$/, "");
+			return length(d) > 0 && length(d) <= 253 && !isV4(d) && match(d, /^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z]{2,63}$/);
+		}
+
+		let rawSrv = lc(trim(getenv("DNS_SRV") || ""));
+		let rawType = lc(trim(getenv("DNS_TYPE") || "udp"));
+		let rawBoot = lc(trim(getenv("DNS_BOOTSTRAP") || ""));
+		let s = rawSrv;
+
 		let v4 = isV4(s);
 		let v6 = v4 ? null : expandV6(s);
+		if (!v4 && !v6) {
+			if ((rawType == "tls" || rawType == "https") && isHost(rawSrv) && length(rawBoot) > 0) {
+				s = rawBoot;
+				v4 = isV4(s);
+				v6 = v4 ? null : expandV6(s);
+			}
+		}
 		if (!v4 && !v6) exit(1);
 		if (v4 && (s == "0.0.0.0" || substr(s, 0, 4) == "127.")) exit(1);
 		if (v6) {
@@ -620,12 +643,12 @@ apply_config() {
 				fi
 			fi
 			dnsmasq_restore || exit 1
+			cron_remove >/dev/null 2>&1 || true
 			exit 0
 		fi
 
-		local_dns="$(uci_get "dns.local_server" "")"
-		if ! check_local_dns "$local_dns"; then
-			printf 'Valid direct upstream DNS IP (dns.local_server) is required before applying\n' >&2
+		if ! check_local_dns; then
+			printf 'Valid direct upstream DNS configuration (dns.local_server / dns.local_bootstrap) is required before applying\n' >&2
 			exit 1
 		fi
 
@@ -689,6 +712,7 @@ apply_config() {
 			failed_step='Could not publish the rule-set manifest'
 		else
 			staged_manifest=""
+			cron_sync >/dev/null 2>&1 || true
 			staged_last_good="$(mktemp "$CONF_DIR/.last-good.XXXXXX")" &&
 				cp "$SB_CONFIG" "$staged_last_good" &&
 				mv -f "$staged_last_good" "$SB_LAST_GOOD" &&
@@ -745,9 +769,8 @@ write_config() {
 			exit 1
 		fi
 
-		local_dns="$(uci_get "dns.local_server" "")"
-		if ! check_local_dns "$local_dns"; then
-			printf 'Valid direct upstream DNS IP (dns.local_server) is required before writing config\n' >&2
+		if ! check_local_dns; then
+			printf 'Valid direct upstream DNS configuration (dns.local_server / dns.local_bootstrap) is required before writing config\n' >&2
 			exit 1
 		fi
 
@@ -775,14 +798,144 @@ write_config() {
 	) 9>"$LOCK_FILE"
 }
 
+validate_cron_number() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -ge "$2" ] 2>/dev/null && [ "$1" -le "$3" ] 2>/dev/null
+}
+
+validate_cron_field() {
+	local field="$1" minimum="$2" maximum="$3"
+	local item base step start end old_ifs
+	case "$field" in
+		''|,*|*,|*,,*|*[!0-9*/,-]*) return 1 ;;
+	esac
+	old_ifs="$IFS"
+	IFS=','
+	set -f
+	# shellcheck disable=SC2086
+	set -- $field
+	set +f
+	IFS="$old_ifs"
+	for item in "$@"; do
+		base="${item%%/*}"
+		if [ "$base" != "$item" ]; then
+			step="${item#*/}"
+			[ "${step#*/}" = "$step" ] || return 1
+			validate_cron_number "$step" 1 "$((maximum - minimum + 1))" || return 1
+		fi
+		[ "$base" = '*' ] && continue
+		start="${base%%-*}"
+		if [ "$start" != "$base" ]; then
+			end="${base#*-}"
+			[ -n "$start" ] && [ -n "$end" ] && [ "${end#*-}" = "$end" ] || return 1
+			validate_cron_number "$start" "$minimum" "$maximum" || return 1
+			validate_cron_number "$end" "$minimum" "$maximum" || return 1
+			[ "$start" -le "$end" ] || return 1
+		else
+			validate_cron_number "$base" "$minimum" "$maximum" || return 1
+		fi
+	done
+}
+
+validate_cron_expr() {
+	local expr="$1"
+	case "$expr" in
+		""|*[!0-9*/,\ -]*) return 1 ;;
+	esac
+	set -f
+	# shellcheck disable=SC2086
+	set -- $expr
+	set +f
+	[ "$#" -eq 5 ] || return 1
+	validate_cron_field "$1" 0 59 &&
+		validate_cron_field "$2" 0 23 &&
+		validate_cron_field "$3" 1 31 &&
+		validate_cron_field "$4" 1 12 &&
+		validate_cron_field "$5" 0 6
+}
+
+cron_configure() {
+	local want_enabled="$1" expr="$2"
+	local cron_dir lock_dir tmp="" changed=0
+
+	if [ "$want_enabled" != "1" ] && [ ! -f "$CRON_FILE" ]; then
+		return 0
+	fi
+	if [ "$want_enabled" != "1" ] && ! grep -qF "$CRON_TAG" "$CRON_FILE" 2>/dev/null; then
+		return 0
+	fi
+
+	cron_dir="$(dirname "$CRON_FILE")"
+	lock_dir="$(dirname "$CRON_LOCK")"
+	mkdir -p "$cron_dir" "$lock_dir" || return 1
+
+	(
+		if command -v lock >/dev/null 2>&1; then
+			lock "$CRON_LOCK" || exit 1
+			trap 'rm -f "$tmp"; lock -u "$CRON_LOCK"' EXIT INT TERM
+		else
+			trap 'rm -f "$tmp"' EXIT INT TERM
+		fi
+
+		tmp="$(mktemp "$cron_dir/.singsing-cron.XXXXXX")" || exit 1
+		if [ -f "$CRON_FILE" ]; then
+			grep -vF "$CRON_TAG" "$CRON_FILE" > "$tmp" 2>/dev/null || : > "$tmp"
+		else
+			: > "$tmp"
+		fi
+
+		if [ "$want_enabled" = "1" ]; then
+			if validate_cron_expr "$expr"; then
+				printf '%s /usr/share/singsing/service-manager.sh update_rulesets >/dev/null 2>&1 %s\n' "$expr" "$CRON_TAG" >> "$tmp"
+			else
+				logger -t singsing -p daemon.warn "Ignoring invalid ruleset_update_cron expression: $expr"
+			fi
+		fi
+
+		chmod 600 "$tmp" || exit 1
+		if [ -f "$CRON_FILE" ] && cmp -s "$tmp" "$CRON_FILE"; then
+			rm -f "$tmp"
+			tmp=""
+		else
+			mv -f "$tmp" "$CRON_FILE" || exit 1
+			tmp=""
+			changed=1
+		fi
+
+		if [ "$changed" -eq 1 ]; then
+			printf 'root\n' >> "$cron_dir/cron.update" 2>/dev/null || true
+		fi
+	)
+}
+
+cron_sync() {
+	local enabled auto_update expr
+	enabled="$(uci_get "main.enabled" "0")"
+	auto_update="$(uci_get "main.ruleset_auto_update" "0")"
+	expr="$(uci_get "main.ruleset_update_cron" "0 4 * * *")"
+	if [ "$enabled" = "1" ] && [ "$auto_update" = "1" ]; then
+		cron_configure 1 "$expr"
+	else
+		cron_configure 0 ""
+	fi
+}
+
+cron_remove() {
+	cron_configure 0 ""
+}
+
 case "${1:-}" in
 	ensure_dirs)            ensure_dirs ;;
 	disable_stock_singbox)  disable_stock_singbox ;;
-	check_local_dns)        check_local_dns "${2:-}" ;;
+	check_local_dns)        check_local_dns "${2:-}" "${3:-}" "${4:-}" ;;
 	dnsmasq_takeover)       dnsmasq_takeover ;;
 	dnsmasq_restore)        dnsmasq_restore ;;
 	ensure_rulesets)        ensure_rulesets ;;
 	update_rulesets)        update_rulesets "${2:-}" ;;
+	cron_sync)              cron_sync ;;
+	cron_remove)            cron_remove ;;
 	reload_if_running)      reload_if_running ;;
 	validate_config)        validate_config "${2:-$TMP_NEW_CONFIG}" ;;
 	wait_dns_ready)         wait_dns_ready "${2:-10}" ;;
@@ -790,7 +943,7 @@ case "${1:-}" in
 	write_config)           write_config "${2:-}" "${3:-}" ;;
 	apply_config)           apply_config "${2:-}" "${3:-}" ;;
 	*)
-		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|reload_if_running|validate_config|wait_dns_ready|write_config|apply_config}\n' "$0" >&2
+		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|cron_sync|cron_remove|reload_if_running|validate_config|wait_dns_ready|write_config|apply_config}\n' "$0" >&2
 		exit 1
 		;;
 esac

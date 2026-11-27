@@ -223,6 +223,30 @@ function getLanIps() {
 	return ips;
 }
 
+function getWanDns(lanIps) {
+	let servers = [];
+	let seen = {};
+	let lanSet = {};
+	for (let lip in (lanIps || [])) lanSet[lc(trim('' + lip))] = true;
+
+	let addDns = (ip) => {
+		let v = trim('' + (ip || ''));
+		let lv = lc(v);
+		if (length(v) == 0 || seen[lv] || lanSet[lv]) return;
+		if (lv == '0.0.0.0' || substr(lv, 0, 4) == '127.' || lv == '::' || lv == '::1') return;
+		seen[lv] = true;
+		push(servers, v);
+	};
+
+	for (let ifc in ['wan', 'wan6']) {
+		let u = runCmd(`ubus call network.interface.${ifc} status 2>/dev/null`);
+		if (u.code != 0 || length(u.output) == 0) continue;
+		let d = safeJson(u.output);
+		for (let s in (d?.['dns-server'] || [])) addDns(s);
+	}
+	return servers;
+}
+
 function getServicePid() {
 	let u = runCmd(`ubus call service list '{"name":"singsing"}' 2>/dev/null`);
 	if (u.code == 0 && length(u.output) > 0) {
@@ -374,6 +398,7 @@ const methods = {
 
 			let configExists = stat(SB_CONFIG) != null;
 			let dnsmasqTakenOver = isDnsmasqTakenOver();
+			let lanIps = getLanIps();
 
 			return {
 				running: running,
@@ -392,7 +417,8 @@ const methods = {
 				local_dns: c.get('singsing', 'dns', 'local_server') || '',
 				local_dns_type: c.get('singsing', 'dns', 'local_type') || 'udp',
 				listen_port: int(c.get('singsing', 'dns', 'listen_port') || '5335'),
-				lan_ips: getLanIps(),
+				lan_ips: lanIps,
+				wan_dns: getWanDns(lanIps),
 				offload_warning: getOffloadWarning()
 			};
 		}
@@ -565,8 +591,8 @@ const methods = {
 			let wasEnabled = c.get('singsing', 'main', 'enabled') == '1';
 			if (act == 'start' || act == 'restart') {
 				let localDns = trim(c.get('singsing', 'dns', 'local_server') || '');
-				if (length(localDns) == 0 || runCmd(`${SERVICE_MGR} check_local_dns ${shellQuote(localDns)}`).code != 0)
-					return { ok: false, error: '必须先填写有效的直连上游 DNS IP（不可为空、域名、回环地址或路由器自身 IP）' };
+				if (length(localDns) == 0 || runCmd(`${SERVICE_MGR} check_local_dns`).code != 0)
+					return { ok: false, error: '必须先填写有效的直连上游 DNS 配置（不可为空、回环地址或路由器自身 IP；DoT/DoH 域名需填引导 IP）' };
 				if (!wasEnabled) {
 					c.set('singsing', 'main', 'enabled', '1');
 					if (!c.commit('singsing')) return { ok: false, error: '提交 UCI 启用状态失败' };
@@ -609,6 +635,7 @@ const methods = {
 				listen_port: port,
 				port_in_use: portBusy,
 				lan_ips: lanIps,
+				wan_dns: getWanDns(lanIps),
 				dnsmasq_taken_over: isDnsmasqTakenOver(),
 				offload_warning: getOffloadWarning()
 			};

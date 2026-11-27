@@ -3,6 +3,25 @@
 /usr/share/singsing/service-manager.sh ensure_dirs
 /usr/share/singsing/service-manager.sh disable_stock_singbox >/dev/null 2>&1 || true
 
+# Ensure new UCI sections exist on upgrade without overwriting user choices
+if [ -f /etc/config/singsing ]; then
+	uci -q get singsing.mixed >/dev/null 2>&1 || {
+		uci -q set singsing.mixed='mixed'
+		uci -q set singsing.mixed.enabled='0'
+		uci -q set singsing.mixed.listen_address='::'
+		uci -q set singsing.mixed.listen_port='5330'
+	}
+	uci -q get singsing.routing >/dev/null 2>&1 || {
+		uci -q set singsing.routing='routing'
+		uci -q set singsing.routing.bypass_cn='1'
+		uci -q set singsing.routing.cn_site_ruleset='geosite-cn'
+		uci -q set singsing.routing.port_mode='all'
+		uci -q set singsing.routing.custom_ports=''
+		uci -q set singsing.routing.block_quic='0'
+	}
+	uci -q commit singsing 2>/dev/null || true
+fi
+
 # Migrate existing singsing-generated config from legacy path if present
 if [ ! -s /etc/singsing/sing-box.json ] && [ -s /etc/sing-box/config.json ]; then
 	if grep -q '"dns-in"' /etc/sing-box/config.json 2>/dev/null; then

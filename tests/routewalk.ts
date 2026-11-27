@@ -1,6 +1,6 @@
-// Walks route rules for a connection to an IP address (no sniffed domain) to see where it ends.
+// Walks route rules for a connection to an IP address (and optional metadata) to see where it ends.
 // IP prefixes are matched for real (inline rule-sets included); remote rule-sets other than
-// geoip-cn never match, and geoip-cn is whatever the connection says.
+// geoip-cn/geosite-cn/geosite-geolocation-cn/gfwlist never match unless flagged on the connection.
 
 import { BlockList, isIPv6 } from "node:net";
 
@@ -10,8 +10,17 @@ export interface Connection {
   mode: "Direct" | "GFWList" | "Non-CN" | "Global";
   ip: string;
   port?: number;
+  network?: "tcp" | "udp";
+  inbound?: string;
+  sourceIp?: string;
+  sourceMac?: string;
+  domain?: string;
   /** The address is in geoip-cn. */
   cn?: boolean;
+  /** The reverse-mapped/sniffed domain is in geosite-cn / geosite-geolocation-cn. */
+  cnSite?: boolean;
+  /** The domain is in gfwlist. */
+  gfw?: boolean;
   /** This device has a public IPv6 address. */
   publicV6Iface?: boolean;
 }
@@ -28,15 +37,56 @@ function inPrefixes(ip: string, prefixes: string[]): boolean {
   return block.check(ip, isIPv6(ip) ? "ipv6" : "ipv4");
 }
 
+const PRIVATE_PREFIXES = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "::1/128",
+  "fc00::/7",
+  "fe80::/10",
+];
+
 function inRuleSet(tag: string, config: Json, c: Connection): boolean {
   if (tag === "geoip-cn") return !!c.cn;
+  if (tag === "geosite-cn" || tag === "geosite-geolocation-cn") return !!c.cnSite;
+  if (tag === "gfwlist") return !!c.gfw;
   const set = config.route.rule_set.find((r: Json) => r.tag === tag);
   if (set?.type !== "inline") return false;
-  return set.rules.some((r: Json) => r.ip_cidr && inPrefixes(c.ip, r.ip_cidr));
+  return set.rules.some((r: Json) => {
+    if (r.ip_cidr && inPrefixes(c.ip, r.ip_cidr)) return true;
+    if (c.domain && r.domain && list(r.domain).includes(c.domain)) return true;
+    if (c.domain && r.domain_suffix && list(r.domain_suffix).some((s: string) => c.domain === s || c.domain!.endsWith(s.startsWith(".") ? s : `.${s}`))) return true;
+    return false;
+  });
 }
 
-/** sing-box ORs a rule's destination fields together; with no sniffed domain only addresses can match. */
+function inPortRanges(port: number, ranges: string[]): boolean {
+  return ranges.some((r) => {
+    const [a, b] = r.split(":").map(Number);
+    return port >= a && port <= b;
+  });
+}
+
 const DESTINATION = ["domain", "domain_suffix", "domain_keyword", "domain_regex", "ip_cidr", "ip_is_private"];
+
+function matchesDestination(rule: Json, c: Connection): boolean {
+  const keys = DESTINATION.filter((k) => k in rule);
+  if (keys.length === 0) return true;
+  return keys.some((k) => {
+    if (k === "ip_cidr") return inPrefixes(c.ip, list(rule.ip_cidr));
+    if (k === "ip_is_private") return rule.ip_is_private === inPrefixes(c.ip, PRIVATE_PREFIXES);
+    if (!c.domain) return false;
+    if (k === "domain") return list(rule.domain).includes(c.domain);
+    if (k === "domain_suffix") {
+      return list(rule.domain_suffix).some((s: string) => c.domain === s || c.domain!.endsWith(s.startsWith(".") ? s : `.${s}`));
+    }
+    if (k === "domain_keyword") return list(rule.domain_keyword).some((kw: string) => c.domain!.includes(kw));
+    if (k === "domain_regex") return list(rule.domain_regex).some((re: string) => new RegExp(re).test(c.domain!));
+    return false;
+  });
+}
 
 function matches(rule: Json, config: Json, c: Connection): boolean {
   let ok: boolean;
@@ -44,9 +94,10 @@ function matches(rule: Json, config: Json, c: Connection): boolean {
     const results = rule.rules.map((r: Json) => matches(r, config, c));
     ok = rule.mode === "and" ? results.every(Boolean) : results.some(Boolean);
   } else {
-    const destination = DESTINATION.filter((k) => k in rule);
+    const port = c.port ?? 443;
+    const net = c.network ?? "tcp";
     ok =
-      (!destination.length || (!!rule.ip_cidr && inPrefixes(c.ip, list(rule.ip_cidr)))) &&
+      matchesDestination(rule, c) &&
       Object.entries(rule).every(([k, v]) => {
         if (DESTINATION.includes(k)) return true;
         switch (k) {
@@ -56,10 +107,12 @@ function matches(rule: Json, config: Json, c: Connection): boolean {
           case "no_drop":
           case "invert":
             return true;
+          case "inbound":
+            return !!c.inbound && list(v).includes(c.inbound);
           case "clash_mode":
             return c.mode === v;
           case "network":
-            return list(v).includes("tcp");
+            return list(v).includes(net);
           case "ip_version":
             return v === (isIPv6(c.ip) ? 6 : 4);
           case "rule_set":
@@ -67,8 +120,13 @@ function matches(rule: Json, config: Json, c: Connection): boolean {
           case "default_interface_address":
             return !!c.publicV6Iface;
           case "port":
-            return list(v).includes(c.port ?? 443);
-          // Needs a sniffed domain or protocol, or a tailnet peer: none here.
+            return list(v).includes(port);
+          case "port_range":
+            return inPortRanges(port, list(v));
+          case "source_ip_cidr":
+            return !!c.sourceIp && inPrefixes(c.sourceIp, list(v));
+          case "source_mac_address":
+            return !!c.sourceMac && list(v).includes(c.sourceMac.toLowerCase());
           default:
             return false;
         }
@@ -77,7 +135,7 @@ function matches(rule: Json, config: Json, c: Connection): boolean {
   return rule.invert ? !ok : ok;
 }
 
-/** The first final action the connection reaches: "reject" or "route:<outbound>". */
+/** The first final action the connection reaches: "bypass", "reject", or "route:<outbound>". */
 export function routeWalk(config: Json, c: Connection): string {
   for (const rule of config.route.rules) {
     if (rule.action === "sniff" || rule.action === "hijack-dns") continue;

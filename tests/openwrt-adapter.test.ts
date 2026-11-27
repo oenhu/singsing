@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import Ajv2020 from "ajv/dist/2020";
 import {
+  defaultOpenWrtRoutingSettings,
   defaultOpenWrtSettings,
   generateOpenWrtConfig,
+  openWrtBlueprintProfile,
   validateOpenWrt,
   type OpenWrtSettings,
 } from "../src/adapter/index";
-import { blueprintProfile, newNode, newTailnet } from "../src/upstream/defaults";
+import { blueprintProfile, newNode, newRule, newTailnet } from "../src/upstream/defaults";
 import { sampleProfiles } from "./samples";
 import { walk } from "./dnswalk";
 import { routeWalk } from "./routewalk";
@@ -156,12 +158,28 @@ describe("DNS adaptation, LAN leak prevention, and upstream policy preservation"
     }
   });
 
-  it("preserves GFWList and Non-CN DNS policies including IPv6 filtering", () => {
+  it("preserves GFWList and Non-CN DNS policies including IPv6 modes", () => {
+    // Default OpenWrt ipv6Mode="direct": keeps direct AAAA even if default_interface lacks global IPv6 (PPPoE/PD safe)
     const cnA = walk(config.dns.rules, { domain: "baidu.com", qtype: "A", mode: "GFWList", publicV6Iface: false });
     expect(cnA.final).toBe("route:local");
 
-    const cnAAAA = walk(config.dns.rules, { domain: "baidu.com", qtype: "AAAA", mode: "GFWList", publicV6Iface: false });
-    expect(cnAAAA.final).toBe("predefined:NOERROR");
+    const cnAAAADirect = walk(config.dns.rules, { domain: "baidu.com", qtype: "AAAA", mode: "GFWList", publicV6Iface: false });
+    expect(cnAAAADirect.final).toBe("route:local");
+
+    // Upstream ipv6Mode="auto": drops direct AAAA when publicV6Iface=false
+    const autoCfg = generateOpenWrtConfig(
+      blueprintProfile(),
+      validSettings({ tun: { ...defaultOpenWrtSettings().tun, ipv6Mode: "auto" } }),
+    ).config as any;
+    expect(walk(autoCfg.dns.rules, { domain: "baidu.com", qtype: "AAAA", mode: "GFWList", publicV6Iface: false }).final).toBe("predefined:NOERROR");
+    expect(walk(autoCfg.dns.rules, { domain: "baidu.com", qtype: "AAAA", mode: "GFWList", publicV6Iface: true }).final).toBe("route:local");
+
+    // ipv6Mode="ipv4_only": unconditionally drops direct AAAA even if publicV6Iface=true
+    const v4Cfg = generateOpenWrtConfig(
+      blueprintProfile(),
+      validSettings({ tun: { ...defaultOpenWrtSettings().tun, ipv6Mode: "ipv4_only" } }),
+    ).config as any;
+    expect(walk(v4Cfg.dns.rules, { domain: "baidu.com", qtype: "AAAA", mode: "GFWList", publicV6Iface: true }).final).toBe("predefined:NOERROR");
 
     const gfwA = walk(config.dns.rules, { domain: "google.com", qtype: "A", mode: "GFWList", gfw: true, publicV6Iface: true });
     expect(gfwA.evaluated).toEqual(["remote"]);
@@ -185,20 +203,40 @@ describe("DNS adaptation, LAN leak prevention, and upstream policy preservation"
     expect(config.route.rules[0]).toEqual({ inbound: "dns-in", action: "hijack-dns" });
   });
 
-  it("preserves IP routing behavior via routewalk", () => {
+  it("preserves IP routing behavior and kernel bypass via routewalk", () => {
+    // Non-TUN (post-sniff) path: CN -> direct, foreign -> proxy
     const cnDirect = routeWalk(config, { ip: "223.5.5.5", mode: "Non-CN", cn: true, publicV6Iface: true });
     expect(cnDirect).toBe("route:direct");
 
     const foreignProxy = routeWalk(config, { ip: "1.1.1.1", mode: "Non-CN", cn: false, publicV6Iface: true });
     expect(foreignProxy).toBe("route:proxy");
 
-    const cnV6NoIface = routeWalk(config, { ip: "2400:3200::1", mode: "Non-CN", cn: true, publicV6Iface: false });
-    expect(cnV6NoIface).toBe("reject");
+    // TUN auto_redirect pre-match path: CN -> kernel bypass, foreign -> proxy, Global -> proxy
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.50", ip: "223.5.5.5", mode: "Non-CN", cn: true })).toBe("bypass");
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.50", ip: "223.5.5.5", mode: "GFWList", cn: true })).toBe("bypass");
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.50", ip: "223.5.5.5", mode: "Global", cn: true })).toBe("route:proxy");
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.50", ip: "1.1.1.1", mode: "Direct", cn: false })).toBe("bypass");
+
+    // TUN source IP guard prevents kernel bypass on TUN-originated sockets
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "172.19.0.1", ip: "223.5.5.5", mode: "Non-CN", cn: true })).toBe("route:direct");
+
+    // Default ipv6Mode="direct" allows CN IPv6; ipv6Mode="auto" / "ipv4_only" rejects it without public v6
+    expect(routeWalk(config, { ip: "2400:3200::1", mode: "Non-CN", cn: true, publicV6Iface: false })).toBe("route:direct");
+    const autoCfg = generateOpenWrtConfig(
+      blueprintProfile(),
+      validSettings({ tun: { ...defaultOpenWrtSettings().tun, ipv6Mode: "auto" } }),
+    ).config as any;
+    expect(routeWalk(autoCfg, { ip: "2400:3200::1", mode: "Non-CN", cn: true, publicV6Iface: false })).toBe("reject");
+    const v4Cfg = generateOpenWrtConfig(
+      blueprintProfile(),
+      validSettings({ tun: { ...defaultOpenWrtSettings().tun, ipv6Mode: "ipv4_only" } }),
+    ).config as any;
+    expect(routeWalk(v4Cfg, { ip: "2400:3200::1", mode: "Non-CN", cn: true, publicV6Iface: true })).toBe("reject");
   });
 });
 
 describe("TUN, localized rule-sets, and flash-friendly paths", () => {
-  it("configures TUN with singtun, auto_redirect, and dns_mode", () => {
+  it("configures TUN with singtun, auto_redirect, mtu=9000, strict_route=false, and dns_mode", () => {
     const { config } = generateOpenWrtConfig(blueprintProfile(), validSettings()) as { config: any };
     const tun = config.inbounds.find((i: any) => i.tag === "tun-in");
     expect(tun).toEqual({
@@ -208,7 +246,8 @@ describe("TUN, localized rule-sets, and flash-friendly paths", () => {
       address: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
       auto_route: true,
       auto_redirect: true,
-      strict_route: true,
+      strict_route: false,
+      mtu: 9000,
       dns_mode: "hijack",
     });
   });
@@ -234,10 +273,10 @@ describe("TUN, localized rule-sets, and flash-friendly paths", () => {
     expect(r2.inbounds.find((i: any) => i.tag === "dns-in")).toBeDefined();
   });
 
-  it("localizes remote rule-sets to /etc/sing-box/rule-sets and removes unused http_clients", () => {
+  it("localizes remote rule-sets to /etc/sing-box/rule-sets (defaulting CN site to geosite-cn) and removes unused http_clients", () => {
     const { config, ruleSets } = generateOpenWrtConfig(blueprintProfile(), validSettings()) as any;
     expect(ruleSets.length).toBeGreaterThanOrEqual(3);
-    expect(ruleSets.map((r: any) => r.tag)).toEqual(expect.arrayContaining(["geoip-cn", "geosite-geolocation-cn", "gfwlist"]));
+    expect(ruleSets.map((r: any) => r.tag)).toEqual(expect.arrayContaining(["geoip-cn", "geosite-cn", "gfwlist"]));
 
     const remoteRemaining = config.route.rule_set.filter((r: any) => r.type === "remote");
     expect(remoteRemaining).toEqual([]);
@@ -486,5 +525,177 @@ describe("Client access control (LAN device steering) schema and rules", () => {
     });
     const { config: cfgNoTun } = generateOpenWrtConfig(blueprintProfile(), tunOffAllow) as any;
     expect(JSON.stringify(cfgNoTun.route.rules)).not.toContain("tun-in");
+  });
+});
+
+describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces, mixed, DNS resilience, Tailscale exit node)", () => {
+  it("gives blocklist higher priority than custom domain rules while keeping LAN private IPs reachable for deviceRules", () => {
+    const p = blueprintProfile();
+    p.settings.rules = [newRule({ outbound: "proxy", lines: ["domain:openai.com", "203.0.113.10"] })];
+    const s = validSettings({
+      accessControl: {
+        mode: "blocklist",
+        clients: ["192.168.1.50"],
+        deviceRules: [
+          { id: "tv", name: "TV", clients: ["192.168.1.88"], outbound: "proxy", enabled: true },
+        ],
+      },
+    });
+    const { config } = generateOpenWrtConfig(p, s) as any;
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+
+    // Blocklisted PC accessing custom-proxied domain/IP still bypasses on tun-in and goes direct post-sniff
+    expect(
+      routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.50", ip: "203.0.113.10", domain: "openai.com", mode: "Non-CN" }),
+    ).toBe("bypass");
+    expect(
+      routeWalk(config, { inbound: "mixed-in", sourceIp: "192.168.1.50", ip: "203.0.113.10", domain: "openai.com", mode: "Non-CN" }),
+    ).toBe("route:direct");
+
+    // Device with explicit proxy rule can still reach LAN NAS directly
+    expect(
+      routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.88", ip: "192.168.1.2", mode: "Non-CN" }),
+    ).toBe("bypass");
+    // And reaches external IP via proxy
+    expect(
+      routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.88", ip: "223.5.5.5", cn: true, mode: "Non-CN" }),
+    ).toBe("route:proxy");
+  });
+
+  it("supports common/custom routing port filtering and proxied-only QUIC (UDP 443) rejection", () => {
+    const s = validSettings({
+      routing: {
+        ...defaultOpenWrtRoutingSettings(),
+        portMode: "custom",
+        customPorts: "80,443,8000-8999",
+        blockQuic: true,
+      },
+    });
+    const { config, issues } = generateOpenWrtConfig(blueprintProfile(), s) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+
+    // Non-proxy high port (BT/P2P 51413) bypasses on tun-in and goes direct post-sniff
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 51413, mode: "Non-CN" })).toBe("bypass");
+    expect(routeWalk(config, { inbound: "mixed-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 51413, mode: "Non-CN" })).toBe("route:direct");
+    // Port inside custom range proxies
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 8443, mode: "Non-CN" })).toBe("route:proxy");
+
+    // Proxied QUIC (UDP 443 to foreign IP) is rejected, while domestic QUIC bypasses
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 443, network: "udp", mode: "Non-CN" })).toBe("reject");
+    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "223.5.5.5", cn: true, port: 443, network: "udp", mode: "Non-CN" })).toBe("bypass");
+  });
+
+  it("supports routeExcludeCn, includeInterface, defaultInterface, udpTimeout, and optional mixed-in inbound", () => {
+    const s = validSettings({
+      tun: {
+        ...defaultOpenWrtSettings().tun,
+        routeExcludeCn: true,
+        includeInterface: ["br-lan"],
+        defaultInterface: "pppoe-wan",
+        udpTimeout: "5m",
+      },
+      mixed: {
+        enabled: true,
+        listenAddress: "::",
+        listenPort: 5330,
+      },
+    });
+    const { config, issues } = generateOpenWrtConfig(blueprintProfile(), s) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+
+    const tun = config.inbounds.find((i: any) => i.tag === "tun-in");
+    expect(tun.route_exclude_address_set).toEqual(["geoip-cn"]);
+    expect(tun.include_interface).toEqual(["br-lan"]);
+    expect(tun.udp_timeout).toBe("5m");
+
+    const mixed = config.inbounds.find((i: any) => i.tag === "mixed-in");
+    expect(mixed).toEqual({
+      type: "mixed",
+      tag: "mixed-in",
+      listen: "::",
+      listen_port: 5330,
+      set_system_proxy: false,
+      udp_timeout: "5m",
+    });
+
+    expect(config.route.default_interface).toBe("pppoe-wan");
+    expect(config.route.auto_detect_interface).toBeUndefined();
+  });
+
+  it("supports domain-based direct DoH with bootstrap IP, backup direct DNS, allowProxyIpv6, and Non-CN SERVFAIL fallback", () => {
+    const s = validSettings({
+      dns: {
+        ...defaultOpenWrtSettings().dns,
+        localType: "https",
+        localServer: "dns.alidns.com",
+        localPort: 443,
+        localServerName: "dns.alidns.com",
+        localBootstrap: "223.5.5.5",
+        localBackupServer: "119.29.29.29",
+        allowProxyIpv6: true,
+      },
+    });
+    const { config, issues } = generateOpenWrtConfig(blueprintProfile(), s) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+
+    expect(config.dns.servers).toContainEqual(expect.objectContaining({
+      tag: "local",
+      type: "https",
+      server: "dns.alidns.com",
+      domain_resolver: "local-bootstrap",
+    }));
+    expect(config.dns.servers).toContainEqual({
+      type: "udp",
+      tag: "local-bootstrap",
+      server: "223.5.5.5",
+      server_port: 53,
+    });
+    expect(config.dns.servers).toContainEqual({
+      type: "udp",
+      tag: "local-backup",
+      server: "119.29.29.29",
+      server_port: 53,
+    });
+    // Non-CN SERVFAIL/REFUSED fallback to local exists
+    expect(JSON.stringify(config.dns.rules)).toContain("SERVFAIL");
+    expect(JSON.stringify(config.dns.rules)).toContain("REFUSED");
+    // Proxy AAAA is allowed when allowProxyIpv6=true
+    const gfwAAAA = walk(config.dns.rules, { domain: "google.com", qtype: "AAAA", mode: "GFWList", gfw: true, publicV6Iface: true });
+    expect(gfwAAAA.evaluated).toEqual(["remote"]);
+  });
+
+  it("adds Tailscale Exit Node inbound DNS hijack & LAN/subnet direct rules when advertise_exit_node is enabled", () => {
+    const p = blueprintProfile();
+    p.settings.tailnets = [
+      newTailnet({
+        tag: "ts-exit",
+        endpoint: JSON.stringify({
+          state_directory: "ts-exit",
+          hostname: "openwrt",
+          advertise_exit_node: true,
+          advertise_routes: ["192.168.10.0/24"],
+          exit_node_allow_lan_access: true,
+        }),
+      }),
+    ];
+    const { config, issues } = generateOpenWrtConfig(p, validSettings()) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+    expect(config.route.rules).toContainEqual({ inbound: "ts-exit", port: 53, action: "hijack-dns" });
+    expect(config.route.rules).toContainEqual({
+      inbound: "ts-exit",
+      ip_is_private: true,
+      ip_cidr: ["192.168.10.0/24"],
+      action: "route",
+      outbound: "direct",
+    });
+  });
+
+  it("openWrtBlueprintProfile defaults to Non-CN without mutating upstream blueprintProfile", () => {
+    expect(openWrtBlueprintProfile().settings.defaultMode).toBe("Non-CN");
+    expect(blueprintProfile().settings.defaultMode).toBe("GFWList");
   });
 });
