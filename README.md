@@ -16,24 +16,24 @@
 - **静态节点多格式导入**：节点管理页直接复用上游 `singbox-confgen` 解析器，支持粘贴导入 sing-box JSON / Clash / Mihomo YAML / Base64 / SIP008 / 分享链接，不内置后台订阅定时拉取或第二套配置生成引擎。
 - **安全事务与自动回滚**：独立运行配置路径 `/etc/singsing/sing-box.json`（自动停用系统冲突的 `/etc/init.d/sing-box`），应用前强制 `sing-box check`，支持自定义核心路径与 `no_new_privs` 加固，启动检查同时覆盖进程、DNS 监听与 TUN 接口就绪，成功后原子刷新 `sing-box.last-good.json`，失败自动回滚并还原 `dnsmasq`。
 
-## 安装、升级和卸载（v0.1.2）
+## 安装、升级和卸载（v0.1.3）
 
 ### 环境与安装包
 
 | 环境 | 安装包 | 验证范围 |
 | --- | --- | --- |
-| OpenWrt 24.10.8 | `luci-app-singsing_0.1.2-r1_all.ipk` | 正式 SDK 构建、包检查与官方 24.10.8 `armsr/armv8` QEMU VM 安装/运行/卸载全链路通过 |
-| OpenWrt 25.12.6 | `luci-app-singsing-0.1.2-r1.apk` | 正式 SDK 构建、包检查与官方 25.12.6 `armsr/armv8` QEMU VM 安装/运行/卸载全链路通过 |
+| OpenWrt 24.10.8 | `luci-app-singsing_0.1.3-r1_all.ipk` | 正式 SDK 构建、包检查与官方 24.10.8 `armsr/armv8` QEMU VM 安装/运行/卸载全链路通过 |
+| OpenWrt 25.12.6 | `luci-app-singsing-0.1.3-r1.apk` | 正式 SDK 构建、包检查与官方 25.12.6 `armsr/armv8` QEMU VM 安装/运行/卸载全链路通过 |
 | LibWrt 25.12-SNAPSHOT | 同一 APK | 真机升级与全链路运行验证通过，核心为 sing-box 1.14.4 |
 
 在路由器上先执行 `sing-box version`。当前验证核心为 **1.14.4**，默认路径是 `/usr/bin/sing-box`。选择对应固件的安装包，并对照 Release 的 `SHA256SUMS` 检查文件。
 
 ```sh
 # OpenWrt 24.10
-opkg install ./luci-app-singsing_0.1.2-r1_all.ipk
+opkg install ./luci-app-singsing_0.1.3-r1_all.ipk
 
 # OpenWrt 25.12 / 本次验证的 LibWrt Snapshot
-apk add --allow-untrusted ./luci-app-singsing-0.1.2-r1.apk
+apk add --allow-untrusted ./luci-app-singsing-0.1.3-r1.apk
 ```
 
 依赖包来自设备固件对应的软件源。安装后进入 **服务 → Sing-Box**，填写直连上游 DNS IP，保存节点及分流。可在运行概览先点击「生成配置」完成离线校验与写入，再通过「启用服务」开关或「启动」按钮一键拉起服务。成功后在运行概览确认 TUN 状态，在运行日志确认 DNS 转发。
