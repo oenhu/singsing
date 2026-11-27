@@ -151,6 +151,7 @@ var callClashApi = rpc.declare({
 	expect: {}
 });
 
+var ENGINE_BUNDLE_REV = 'a878aff34906';
 var enginePromise = null;
 
 function loadEngine() {
@@ -161,7 +162,8 @@ function loadEngine() {
 
 	enginePromise = new Promise(function(resolve, reject) {
 		var script = document.createElement('script');
-		script.src = L.resource('singsing/engine-bundle.js');
+		var bundleUrl = L.resource('singsing/engine-bundle.js');
+		script.src = bundleUrl + (bundleUrl.indexOf('?') >= 0 ? '&' : '?') + 'rev=' + encodeURIComponent(ENGINE_BUNDLE_REV);
 		script.onload = function() {
 			if (window.SingboxConfgen) resolve(window.SingboxConfgen);
 			else reject(new Error('SingboxConfgen bundle failed to initialize'));

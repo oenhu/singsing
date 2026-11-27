@@ -44,6 +44,8 @@ if [ -f /etc/crontabs/root ] && grep -q '# singsing-sub' /etc/crontabs/root 2>/d
 fi
 
 /etc/init.d/singsing enable >/dev/null 2>&1 || true
+# Refresh static JS mtimes so uhttpd Last-Modified / ETag updates across SDK SOURCE_DATE_EPOCH upgrades
+touch /www/luci-static/resources/singsing/*.js /www/luci-static/resources/view/singsing/*.js 2>/dev/null || true
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/*
 
 exit 0

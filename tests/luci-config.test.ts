@@ -1091,4 +1091,24 @@ describe("LuCI OpenWrt gateway settings round trip (P0/P1/P2)", () => {
     const { config: cfg2 } = applied(h);
     expect(cfg2.experimental.clash_api.external_controller).toBeUndefined();
   });
+
+  it("renders all three DNS groups expanded without tabs and keeps ENGINE_BUNDLE_REV synced", async () => {
+    const fs = await import("node:fs");
+    const crypto = await import("node:crypto");
+    const settingsSrc = fs.readFileSync("htdocs/luci-static/resources/view/singsing/settings.js", "utf8");
+    expect(settingsSrc).not.toMatch(/s\.tab\(/);
+    expect(settingsSrc).not.toMatch(/s\.taboption\(/);
+
+    const h = luci(profile());
+    const v = await h.view("settings");
+    expect(v.form!.value("dns._dns_grp_direct")).toContain("直连");
+    expect(v.form!.value("dns._dns_grp_remote")).toContain("代理");
+    expect(v.form!.value("dns._dns_grp_local")).toContain("dnsmasq");
+
+    const apiSrc = fs.readFileSync("htdocs/luci-static/resources/singsing/api.js", "utf8");
+    const bundleBytes = fs.readFileSync("htdocs/luci-static/resources/singsing/engine-bundle.js");
+    const expectedRev = crypto.createHash("sha256").update(bundleBytes).digest("hex").slice(0, 12);
+    expect(apiSrc).toContain(`var ENGINE_BUNDLE_REV = '${expectedRev}';`);
+    expect(apiSrc).toContain("rev=' + encodeURIComponent(ENGINE_BUNDLE_REV)");
+  });
 });

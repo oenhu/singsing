@@ -126,16 +126,26 @@ return view.extend({
 		o.rmempty = false;
 
 		// ---------------------------------------------------------------
-		// 2. DNS 设置（分标签页：直连上游 / 本地协调 / 代理上游）
-		s = m.section(form.NamedSection, 'dns', 'dns', 'DNS 设置');
-		s.tab('direct', '直连上游 DNS（必填）');
-		s.tab('local', '本地 DNS 与 dnsmasq 协调');
-		s.tab('remote', '代理上游 DNS');
+		// 2. DNS 设置（全部展开，明确三部分同时生效，避免误解为三选一）
+		s = m.section(form.NamedSection, 'dns', 'dns', 'DNS 设置',
+			'以下三部分同时生效，共同组成完整 DNS 分流链路：局域网请求先经「本地 DNS 与 dnsmasq 协调」进入 sing-box，再按分流规则分别发往「直连上游 DNS」（国内/直连域名）与「代理上游 DNS」（境外/代理域名）。');
+
+		var addDnsGroupHeader = function(id, title, desc) {
+			var h = s.option(form.DummyValue, id, title);
+			h.rawhtml = true;
+			h.cfgvalue = function() {
+				return '<div style="font-size:12px;opacity:0.8;padding:4px 0;border-bottom:1px solid var(--border-color-medium, rgba(127,127,127,0.25));">' + desc + '</div>';
+			};
+			h.write = function() {};
+			h.remove = function() {};
+		};
+
+		addDnsGroupHeader('_dns_grp_direct', '① 直连上游 DNS（必填）', '负责解析国内域名、直连规则以及节点服务器域名；同时生效，与下方代理 DNS 配合分流。');
 
 		var savedDnsType = uci.get('singsing', 'dns', 'local_type') || 'udp';
 		var savedDnsPort = uci.get('singsing', 'dns', 'local_port');
 		var localPortOption;
-		o = s.taboption('direct', form.ListValue, 'local_type', 'DNS 协议');
+		o = s.option(form.ListValue, 'local_type', '直连 DNS 协议');
 		o.value('udp', 'UDP');
 		o.value('tcp', 'TCP');
 		o.value('tls', 'DoT (TLS)');
@@ -150,49 +160,34 @@ return view.extend({
 		};
 
 		var wanHint = wanDnsList.length ? (' 当前检测到的 WAN DNS：' + wanDnsList.join('、') + '。') : '';
-		o = s.taboption('direct', form.Value, 'local_server', '上游 DNS 地址（必填）',
+		o = s.option(form.Value, 'local_server', '直连上游 DNS 地址（必填）',
 			'支持 IPv4/IPv6（不可填 127.0.0.1 或路由器 LAN IP）；DoT/DoH 如填域名请同时填写下方引导解析 IP。' + wanHint + '参考：阿里 223.5.5.5、DNSPod 119.29.29.29。');
 		o.placeholder = wanDnsList[0] || '例如 223.5.5.5';
 		o.rmempty = false;
 
-		o = localPortOption = s.taboption('direct', form.Value, 'local_port', '上游 DNS 端口', '留空使用协议默认端口：UDP / TCP 为 53，DoT 为 853，DoH 为 443。');
+		o = localPortOption = s.option(form.Value, 'local_port', '直连上游 DNS 端口', '留空使用协议默认端口：UDP / TCP 为 53，DoT 为 853，DoH 为 443。');
 		o.datatype = 'port';
 		o.placeholder = '协议默认端口';
 
-		o = s.taboption('direct', form.Value, 'local_server_name', 'TLS Server Name (SNI)', '仅 DoT / DoH 协议需要填写，例如 dns.alidns.com');
+		o = s.option(form.Value, 'local_server_name', 'TLS Server Name (SNI)', '仅 DoT / DoH 协议需要填写，例如 dns.alidns.com');
 		o.depends('local_type', 'tls');
 		o.depends('local_type', 'https');
 
-		o = s.taboption('direct', form.Value, 'local_path', 'DoH 路径', '仅 DoH 协议需要填写');
+		o = s.option(form.Value, 'local_path', 'DoH 路径', '仅 DoH 协议需要填写');
 		o.default = '/dns-query';
 		o.depends('local_type', 'https');
 
-		o = s.taboption('direct', form.Value, 'local_bootstrap', '引导解析 DNS IP（域名模式必填）', '当 DoT/DoH 上游填写域名（如 dns.alidns.com）时，用于解析该域名的直连 IP（如 223.5.5.5）');
+		o = s.option(form.Value, 'local_bootstrap', '引导解析 DNS IP（域名模式必填）', '当 DoT/DoH 上游填写域名（如 dns.alidns.com）时，用于解析该域名的直连 IP（如 223.5.5.5）');
 		o.placeholder = wanDnsList[0] || '例如 223.5.5.5';
 		o.depends('local_type', 'tls');
 		o.depends('local_type', 'https');
 
-		o = s.taboption('direct', form.Value, 'local_backup_server', '备用直连 DNS IP（可选）', '主直连 DNS 超时或返回 SERVFAIL/REFUSED 时自动回退的备用 IPv4/IPv6（留空禁用）');
+		o = s.option(form.Value, 'local_backup_server', '备用直连 DNS IP（可选）', '主直连 DNS 超时或返回 SERVFAIL/REFUSED 时自动回退的备用 IPv4/IPv6（留空禁用）');
 		o.placeholder = '例如 119.29.29.29';
 
-		o = s.taboption('local', form.Value, 'listen_address', 'sing-box DNS 监听地址');
-		o.default = '127.0.0.1';
-		o.rmempty = false;
+		addDnsGroupHeader('_dns_grp_remote', '② 代理上游 DNS 与分流策略', '负责经代理出口解析境外与代理规则域名，防止 DNS 污染与泄漏（与上方直连 DNS 同时生效）。');
 
-		o = s.taboption('local', form.Value, 'listen_port', 'sing-box DNS 监听端口', 'dnsmasq 将外部域名转发至此端口（默认 5335）');
-		o.datatype = 'port';
-		o.default = '5335';
-		o.rmempty = false;
-
-		o = s.taboption('local', form.Flag, 'dnsmasq_manage', '自动接管并恢复 dnsmasq 上游', '启动时仅写内存盘 drop-in 接管上游转发并保留 DHCP/本地域名，停止或异常时自动还原');
-		o.default = '1';
-		o.rmempty = false;
-
-		o = s.taboption('local', form.Flag, 'hijack', '接管局域网客户端外部 53 端口 DNS', '启用 sing-box 原生 TUN dns_mode: hijack 与 53 端口路由接管');
-		o.default = '1';
-		o.rmempty = false;
-
-		o = s.taboption('remote', form.ListValue, '_remote_provider', '代理 DNS 服务商');
+		o = s.option(form.ListValue, '_remote_provider', '代理 DNS 服务商');
 		o.value('google', 'Google (8.8.8.8)');
 		o.value('cloudflare', 'Cloudflare (1.1.1.1)');
 		o.value('quad9', 'Quad9 (9.9.9.9)');
@@ -205,7 +200,7 @@ return view.extend({
 		};
 		o.remove = function() {};
 
-		o = s.taboption('remote', form.ListValue, '_remote_protocol', '加密协议');
+		o = s.option(form.ListValue, '_remote_protocol', '代理 DNS 加密协议');
 		o.value('tls', 'DoT (TLS)');
 		o.value('https', 'DoH (HTTPS)');
 		o.depends('_remote_provider', 'google');
@@ -219,7 +214,7 @@ return view.extend({
 		};
 		o.remove = function() {};
 
-		o = s.taboption('remote', form.TextValue, '_remote_custom', '自定义代理 DNS JSONC', '仅在服务商选择「自定义 JSON」时生效，默认经 proxy 出口访问');
+		o = s.option(form.TextValue, '_remote_custom', '自定义代理 DNS JSONC', '仅在服务商选择「自定义 JSON」时生效，默认经 proxy 出口访问');
 		o.rows = 8;
 		o.depends('_remote_provider', 'custom');
 		o.cfgvalue = function() {
@@ -230,7 +225,16 @@ return view.extend({
 		};
 		o.remove = function() {};
 
-		o = s.taboption('remote', form.Value, '_client_subnet', 'EDNS Client Subnet（可选）', '发送给代理 DNS 的 ECS 网段，留空则禁用');
+		o = s.option(form.ListValue, 'non_cn_strategy', 'Non-CN 未知域名 DNS 策略', 'geosite-cn 走直连 DNS、gfwlist 走代理 DNS；其余未知域名可选远端校验（防污染、无泄漏）或并行竞速');
+		o.value('remote_verify', '远端校验防污染（推荐：先查代理 DNS，命中 CN IP 或失败再回退直连 DNS）');
+		o.value('race', '并行竞速（兼容上游：同时查直连与代理 DNS，国内 IP 优先响应）');
+		o.default = 'remote_verify';
+
+		o = s.option(form.Flag, 'allow_proxy_ipv6', '允许代理域名返回 IPv6 记录', '默认关闭（推荐，避免无 IPv6 节点下 TUN 假连通）；仅在代理节点全部支持双栈 IPv6 时开启');
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Value, '_client_subnet', 'EDNS Client Subnet（可选）', '发送给代理 DNS 的 ECS 网段，留空则禁用');
 		o.placeholder = '例如 1.2.3.0/24';
 		o.cfgvalue = function() {
 			return profile.settings.clientSubnet || '';
@@ -242,14 +246,24 @@ return view.extend({
 			profile.settings.clientSubnet = '';
 		};
 
-		o = s.taboption('remote', form.Flag, 'allow_proxy_ipv6', '允许代理域名返回 IPv6 记录', '默认关闭（推荐，避免无 IPv6 节点下 TUN 假连通）；仅在代理节点全部支持双栈 IPv6 时开启');
-		o.default = '0';
+		addDnsGroupHeader('_dns_grp_local', '③ 本地 DNS 与 dnsmasq 协调（高级）', '控制 dnsmasq 与 sing-box 的本地对接方式；一般保持默认即可。');
+
+		o = s.option(form.Value, 'listen_address', 'sing-box DNS 监听地址');
+		o.default = '127.0.0.1';
 		o.rmempty = false;
 
-		o = s.taboption('remote', form.ListValue, 'non_cn_strategy', 'Non-CN 未知域名 DNS 策略', 'geosite-cn 走直连 DNS、gfwlist 走代理 DNS；其余未知域名可选远端校验（防污染、无泄漏）或并行竞速');
-		o.value('remote_verify', '远端校验防污染（推荐：先查代理 DNS，命中 CN IP 或失败再回退直连 DNS）');
-		o.value('race', '并行竞速（兼容上游：同时查直连与代理 DNS，国内 IP 优先响应）');
-		o.default = 'remote_verify';
+		o = s.option(form.Value, 'listen_port', 'sing-box DNS 监听端口', 'dnsmasq 将外部域名转发至此端口（默认 5335）');
+		o.datatype = 'port';
+		o.default = '5335';
+		o.rmempty = false;
+
+		o = s.option(form.Flag, 'dnsmasq_manage', '自动接管并恢复 dnsmasq 上游', '启动时仅写内存盘 drop-in 接管上游转发并保留 DHCP/本地域名，停止或异常时自动还原');
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Flag, 'hijack', '接管局域网客户端外部 53 端口 DNS', '启用 sing-box 原生 TUN dns_mode: hijack 与 53 端口路由接管');
+		o.default = '1';
+		o.rmempty = false;
 
 		// ---------------------------------------------------------------
 		// 3. 透明代理（TUN + Auto Redirect）
