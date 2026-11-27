@@ -115,7 +115,7 @@ jobs:
           cd /tmp/sdk
           ./scripts/feeds update luci
           mkdir -p package/luci-app-singsing
-          rsync -a \
+          rsync -a --no-owner --no-group \
             --exclude='.git' \
             --exclude='node_modules' \
             --exclude='tests' \
@@ -127,6 +127,13 @@ jobs:
         run: |
           cd /tmp/sdk
           make defconfig
+          # Export SDK host staging paths and SDK tar so fakeroot intercepts stat() on Ubuntu 24.04
+          # and all IPK/APK archive entries record 0:0 (root:root) ownership.
+          export STAGING_DIR_HOST="$PWD/staging_dir/host"
+          export PATH="$STAGING_DIR_HOST/bin:$PATH"
+          if [ -x "$STAGING_DIR_HOST/bin/tar" ]; then
+            export TAR="$STAGING_DIR_HOST/bin/tar"
+          fi
           # Package the checked JS and scripts using the SDK without rebuilding runtime dependencies.
           make -C package/luci-app-singsing TOPDIR="$PWD" CONFIG_LUCI_JSMIN= V=s compile
           mkdir -p "${{ github.workspace }}/release-artifacts"

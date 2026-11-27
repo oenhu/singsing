@@ -158,3 +158,81 @@ describe("service-manager application transaction (OpenWrt commands mocked)", ()
     expect(read(f.running)).toBe("5335");
   });
 });
+
+describe("service-manager check_local_dns command dispatch regression", () => {
+  const realDnsEnv = (extra: Record<string, string> = {}) => ({
+    MOCK_REAL_CHECK_DNS: "1",
+    MOCK_ROUTER_IPS: JSON.stringify(["192.168.21.1", "fd00::1"]),
+    ...extra,
+  });
+
+  it("reads UCI settings when invoked with zero arguments (regression for v0.1.3-r1 startup failure)", () => {
+    expect(f.run(["check_local_dns"], realDnsEnv({ MOCK_LOCAL_SERVER: "223.5.5.5" })).status).toBe(0);
+    expect(f.run(["check_local_dns"], realDnsEnv({ MOCK_LOCAL_SERVER: "2400:3200::1" })).status).toBe(0);
+    expect(f.run(["check_local_dns"], realDnsEnv({ MOCK_LOCAL_SERVER: "" })).status).toBe(1);
+    expect(
+      f.run(
+        ["check_local_dns"],
+        realDnsEnv({ MOCK_LOCAL_TYPE: "https", MOCK_LOCAL_SERVER: "dns.alidns.com", MOCK_LOCAL_BOOTSTRAP: "223.5.5.5" }),
+      ).status,
+    ).toBe(0);
+    expect(
+      f.run(
+        ["check_local_dns"],
+        realDnsEnv({ MOCK_LOCAL_TYPE: "https", MOCK_LOCAL_SERVER: "dns.alidns.com", MOCK_LOCAL_BOOTSTRAP: "" }),
+      ).status,
+    ).toBe(1);
+  });
+
+  it("validates explicit arguments for IPv4/IPv6, empty, loopback, router own IPs, and DoT/DoH domain + bootstrap", () => {
+    expect(f.run(["check_local_dns", "223.5.5.5"], realDnsEnv()).status).toBe(0);
+    expect(f.run(["check_local_dns", "2400:3200::1"], realDnsEnv()).status).toBe(0);
+    expect(f.run(["check_local_dns", ""], realDnsEnv({ MOCK_LOCAL_SERVER: "223.5.5.5" })).status).toBe(1);
+    for (const bad of ["127.0.0.1", "127.0.0.53", "0.0.0.0", "::1", "::", "::ffff:127.0.0.1", "192.168.21.1", "fd00:0000:0000:0000:0000:0000:0000:0001"]) {
+      expect(f.run(["check_local_dns", bad], realDnsEnv()).status, bad).toBe(1);
+    }
+    expect(f.run(["check_local_dns", "dns.alidns.com", "udp", "223.5.5.5"], realDnsEnv()).status).toBe(1);
+    expect(f.run(["check_local_dns", "dns.alidns.com", "tls", "223.5.5.5"], realDnsEnv()).status).toBe(0);
+    expect(f.run(["check_local_dns", "dns.alidns.com", "https", "127.0.0.1"], realDnsEnv()).status).toBe(1);
+    expect(f.run(["check_local_dns", "dns.alidns.com", "https", "192.168.21.1"], realDnsEnv()).status).toBe(1);
+    expect(f.run(["check_local_dns", "dns.alidns.com", "https", ""], realDnsEnv({ MOCK_LOCAL_BOOTSTRAP: "223.5.5.5" })).status).toBe(1);
+  });
+});
+
+describe("service-manager cron_sync and cron_remove lifecycle", () => {
+  it("starts native OpenWrt cron on first enable when crond is not running, avoids duplicates, and preserves other entries", () => {
+    writeFileSync(f.cronFile, "*/15 * * * * /usr/bin/other-job # other\n");
+
+    const first = f.run(["cron_sync"], {
+      MOCK_ENABLED: "1",
+      MOCK_CRON_ENABLED: "1",
+      MOCK_CRON_EXPR: "*/5 * * * *",
+      MOCK_CRON_RUNNING_MODE: "stopped",
+      MOCK_CRON_INIT_ENABLED: "1",
+    });
+    expect(first.status).toBe(0);
+    const crontab1 = read(f.cronFile);
+    expect(crontab1).toContain("/usr/bin/other-job # other");
+    expect(crontab1.split("\n").filter((l) => l.includes("# singsing-ruleset"))).toHaveLength(1);
+    expect(read(f.cronUpdate)).toContain("root");
+    expect(read(f.cronEvents)).toContain("cron:enable\ncron:start\n");
+
+    // Repeated sync while crond is already running keeps single entry and does not restart cron
+    writeFileSync(f.cronEvents, "");
+    const second = f.run(["cron_sync"], {
+      MOCK_ENABLED: "1",
+      MOCK_CRON_ENABLED: "1",
+      MOCK_CRON_EXPR: "*/5 * * * *",
+      MOCK_CRON_RUNNING_MODE: "running",
+    });
+    expect(second.status).toBe(0);
+    expect(read(f.cronFile).split("\n").filter((l) => l.includes("# singsing-ruleset"))).toHaveLength(1);
+    expect(read(f.cronEvents)).toBe("");
+
+    // cron_remove strips only singsing entry and preserves unrelated jobs
+    const removed = f.run(["cron_remove"], { MOCK_CRON_RUNNING_MODE: "running" });
+    expect(removed.status).toBe(0);
+    expect(read(f.cronFile)).toContain("/usr/bin/other-job # other");
+    expect(read(f.cronFile)).not.toContain("# singsing-ruleset");
+  });
+});

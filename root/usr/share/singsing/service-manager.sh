@@ -89,8 +89,16 @@ check_local_dns() {
 	local srv="" ltype="" bootstrap=""
 	if [ "$#" -gt 0 ]; then
 		srv="$1"
-		ltype="${2:-$(uci_get "dns.local_type" "udp")}"
-		bootstrap="${3:-$(uci_get "dns.local_bootstrap" "")}"
+		if [ "$#" -ge 2 ]; then
+			ltype="$2"
+		else
+			ltype="$(uci_get "dns.local_type" "udp")"
+		fi
+		if [ "$#" -ge 3 ]; then
+			bootstrap="$3"
+		else
+			bootstrap="$(uci_get "dns.local_bootstrap" "")"
+		fi
 	else
 		srv="$(uci_get "dns.local_server" "")"
 		ltype="$(uci_get "dns.local_type" "udp")"
@@ -856,9 +864,32 @@ validate_cron_expr() {
 		validate_cron_field "$5" 0 6
 }
 
+is_cron_running() {
+	if command -v ubus >/dev/null 2>&1 && command -v ucode >/dev/null 2>&1; then
+		local running
+		running="$(ubus call service list '{"name":"cron"}' 2>/dev/null | ucode -e '
+			import { stdin } from "fs";
+			let d = null;
+			try { d = json(stdin.read("all") || "{}"); } catch (e) { d = null; }
+			let instances = d?.["cron"]?.instances || {};
+			for (let k, inst in instances) {
+				if (inst && inst.running && inst.pid) {
+					print("1");
+					exit(0);
+				}
+			}
+		' 2>/dev/null || true)"
+		[ "$running" = "1" ] && return 0
+	fi
+	if command -v pidof >/dev/null 2>&1 && pidof crond >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
 cron_configure() {
 	local want_enabled="$1" expr="$2"
-	local cron_dir lock_dir tmp="" changed=0
+	local cron_dir lock_dir tmp="" changed=0 wrote_entry=0
 
 	if [ "$want_enabled" != "1" ] && [ ! -f "$CRON_FILE" ]; then
 		return 0
@@ -889,6 +920,7 @@ cron_configure() {
 		if [ "$want_enabled" = "1" ]; then
 			if validate_cron_expr "$expr"; then
 				printf '%s /usr/share/singsing/service-manager.sh update_rulesets >/dev/null 2>&1 %s\n' "$expr" "$CRON_TAG" >> "$tmp"
+				wrote_entry=1
 			else
 				logger -t singsing -p daemon.warn "Ignoring invalid ruleset_update_cron expression: $expr"
 			fi
@@ -907,7 +939,24 @@ cron_configure() {
 		if [ "$changed" -eq 1 ]; then
 			printf 'root\n' >> "$cron_dir/cron.update" 2>/dev/null || true
 		fi
+		if [ "$wrote_entry" -eq 1 ]; then
+			exit 0
+		fi
+		exit 3
 	)
+	local rc=$?
+	if [ "$rc" -eq 0 ]; then
+		# On a clean OpenWrt system with no prior crontabs, /etc/init.d/cron exits early at boot
+		# without spawning crond. Start native cron only when no crond instance is running yet;
+		# if crond is already running, cron.update above safely notifies it without restarting crond.
+		if ! is_cron_running && [ -x /etc/init.d/cron ]; then
+			/etc/init.d/cron enabled >/dev/null 2>&1 || /etc/init.d/cron enable >/dev/null 2>&1 || true
+			/etc/init.d/cron start >/dev/null 2>&1 || true
+		fi
+		return 0
+	fi
+	[ "$rc" -eq 3 ] && return 0
+	return "$rc"
 }
 
 cron_sync() {
@@ -929,19 +978,19 @@ cron_remove() {
 case "${1:-}" in
 	ensure_dirs)            ensure_dirs ;;
 	disable_stock_singbox)  disable_stock_singbox ;;
-	check_local_dns)        check_local_dns "${2:-}" "${3:-}" "${4:-}" ;;
+	check_local_dns)        shift; check_local_dns "$@" ;;
 	dnsmasq_takeover)       dnsmasq_takeover ;;
 	dnsmasq_restore)        dnsmasq_restore ;;
 	ensure_rulesets)        ensure_rulesets ;;
-	update_rulesets)        update_rulesets "${2:-}" ;;
+	update_rulesets)        shift; update_rulesets "$@" ;;
 	cron_sync)              cron_sync ;;
 	cron_remove)            cron_remove ;;
 	reload_if_running)      reload_if_running ;;
-	validate_config)        validate_config "${2:-$TMP_NEW_CONFIG}" ;;
-	wait_dns_ready)         wait_dns_ready "${2:-10}" ;;
+	validate_config)        shift; validate_config "$@" ;;
+	wait_dns_ready)         shift; wait_dns_ready "$@" ;;
 	wait_service_stopped)   wait_service_stopped ;;
-	write_config)           write_config "${2:-}" "${3:-}" ;;
-	apply_config)           apply_config "${2:-}" "${3:-}" ;;
+	write_config)           shift; write_config "$@" ;;
+	apply_config)           shift; apply_config "$@" ;;
 	*)
 		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|cron_sync|cron_remove|reload_if_running|validate_config|wait_dns_ready|write_config|apply_config}\n' "$0" >&2
 		exit 1

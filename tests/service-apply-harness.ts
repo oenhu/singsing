@@ -11,7 +11,9 @@ export function serviceApplyFixture() {
   const runtimeDir = join(dir, "runtime");
   const initDir = join(dir, "init.d");
   const dnsDir = join(dir, "dns");
-  for (const path of [configDir, runtimeDir, initDir, dnsDir]) mkdirSync(path);
+  const cronDir = join(dir, "crontabs");
+  const binDir = join(dir, "bin");
+  for (const path of [configDir, runtimeDir, initDir, dnsDir, cronDir, binDir]) mkdirSync(path);
   const config = join(configDir, "sing-box.json");
   const lastGood = join(configDir, "sing-box.last-good.json");
   const manifest = join(configDir, "rulesets-manifest.json");
@@ -19,14 +21,20 @@ export function serviceApplyFixture() {
   const candidateManifest = join(dir, "candidate-manifest.json");
   const running = join(dir, "running");
   const dropIn = join(dnsDir, "dnsmasq-singsing.conf");
+  const cronFile = join(cronDir, "root");
+  const cronLock = join(runtimeDir, "root-crontab");
+  const cronUpdate = join(cronDir, "cron.update");
+  const cronEvents = join(dir, "cron-events");
   const events = join(dir, "events");
   const mockBox = join(dir, "sing-box-mock");
   const manager = join(dir, "service-manager.sh");
   const source = readFileSync(new URL("../root/usr/share/singsing/service-manager.sh", import.meta.url), "utf8")
-    .replace(/\/etc\/init\.d\/(singsing|sing-box|dnsmasq)/g, initDir + "/$1")
+    .replace(/\/etc\/init\.d\/(singsing|sing-box|dnsmasq|cron)/g, initDir + "/$1")
     .replace('CONF_DIR="/etc/singsing"', 'CONF_DIR="' + configDir + '"')
     .replace('SB_DIR="/etc/sing-box"', 'SB_DIR="' + join(dir, "sing-box-state") + '"')
     .replace('TMP_DIR="/tmp/singsing"', 'TMP_DIR="' + runtimeDir + '"')
+    .replace('CRON_FILE="/etc/crontabs/root"', 'CRON_FILE="' + cronFile + '"')
+    .replace('CRON_LOCK="/var/lock/root-crontab"', 'CRON_LOCK="' + cronLock + '"')
     .replaceAll("/tmp/dnsmasq.d/", dnsDir + "/")
     .replaceAll("/tmp/dnsmasq.*.d/", dnsDir + "/*/");
   const dispatch = source.lastIndexOf('\ncase "\u0024{1:-}" in');
@@ -38,12 +46,17 @@ export function serviceApplyFixture() {
     '    main.auto_rollback) printf "%s" "\u0024{MOCK_ROLLBACK:-1}";;',
     '    main.singbox_bin) printf "%s" "$MOCK_BOX";;',
     '    main.ruleset_dir|main.tailscale_state_root) printf "%s" "$MOCK_DATA_DIR";;',
-    '    dns.local_server) printf "223.5.5.5";;',
+    '    main.ruleset_auto_update) printf "%s" "\u0024{MOCK_CRON_ENABLED:-0}";;',
+    '    main.ruleset_update_cron) printf "%s" "\u0024{MOCK_CRON_EXPR:-0 4 * * *}";;',
+    '    dns.local_server) printf "%s" "\u0024{MOCK_LOCAL_SERVER-223.5.5.5}";;',
+    '    dns.local_type) printf "%s" "\u0024{MOCK_LOCAL_TYPE:-udp}";;',
+    '    dns.local_bootstrap) printf "%s" "\u0024{MOCK_LOCAL_BOOTSTRAP:-}";;',
     '    dns.listen_port) printf "%s" "\u0024{MOCK_NEW_PORT:-5335}";;',
     '    *) printf "%s" "\u0024{2:-}";;',
     '  esac',
     '}',
-    'check_local_dns() { return 0; }',
+    'if [ "\u0024{MOCK_REAL_CHECK_DNS:-0}" != "1" ]; then check_local_dns() { return 0; }; fi',
+    'if [ "\u0024{MOCK_CRON_RUNNING_MODE:-}" = "running" ]; then is_cron_running() { return 0; }; elif [ "\u0024{MOCK_CRON_RUNNING_MODE:-}" = "stopped" ]; then is_cron_running() { return 1; }; fi',
     'flock() { return 0; }',
     'ensure_rulesets() { return 0; }',
     'get_service_pid() { if [ -f "$MOCK_RUNNING" ]; then printf 123; fi; }',
@@ -72,6 +85,52 @@ export function serviceApplyFixture() {
     'sleep() { :; }',
   ].join("\n");
   writeFileSync(manager, source.slice(0, dispatch) + "\n" + stubs + source.slice(dispatch), { mode: 0o700 });
+  writeFileSync(join(initDir, "cron"), [
+    "#!/bin/sh",
+    'printf "cron:%s\\n" "$1" >> "$MOCK_CRON_EVENTS"',
+    'if [ "$1" = "enabled" ]; then exit "${MOCK_CRON_INIT_ENABLED:-1}"; fi',
+    "exit 0",
+  ].join("\n"), { mode: 0o700 });
+  // Lightweight ucode shim for check_local_dns dispatch tests on hosts without OpenWrt ucode
+  writeFileSync(join(binDir, "ucode"), [
+    "#!/usr/bin/env node",
+    'const { isIP } = require("node:net");',
+    'const rawSrv = (process.env.DNS_SRV || "").trim().toLowerCase();',
+    'const rawType = (process.env.DNS_TYPE || "udp").trim().toLowerCase();',
+    'const rawBoot = (process.env.DNS_BOOTSTRAP || "").trim().toLowerCase();',
+    'const lanIps = JSON.parse(process.env.MOCK_ROUTER_IPS || "[]").map((x) => x.toLowerCase());',
+    'function expandV6(raw) {',
+    '  let ip = raw.trim();',
+    '  if (!ip.includes(":")) return null;',
+    '  if ((ip.startsWith(":") && !ip.startsWith("::")) || (ip.endsWith(":") && !ip.endsWith("::"))) return null;',
+    '  const lc = ip.lastIndexOf(":"); const tail = ip.slice(lc + 1);',
+    '  if (tail.includes(".")) {',
+    '    if (isIP(tail) !== 4) return null;',
+    '    const p = tail.split(".").map(Number);',
+    '    ip = ip.slice(0, lc + 1) + ((p[0] << 8) | p[1]).toString(16) + ":" + ((p[2] << 8) | p[3]).toString(16);',
+    '  }',
+    '  const halves = ip.split("::"); if (halves.length > 2) return null;',
+    '  const parse = (s) => { if (!s) return []; const o = []; for (const g of s.split(":")) { if (!/^[0-9a-f]{1,4}$/.test(g)) return null; o.push(parseInt(g, 16)); } return o; };',
+    '  const l = parse(halves[0]); if (!l) return null;',
+    '  if (halves.length === 2) { const r = parse(halves[1]); if (!r || l.length + r.length > 7) return null; return [...l, ...Array(8 - l.length - r.length).fill(0), ...r]; }',
+    '  return l.length === 8 ? l : null;',
+    '}',
+    'const isHost = (h) => { const d = h.replace(/\\.$/, ""); return d.length > 0 && d.length <= 253 && isIP(d) !== 4 && /^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\\.)+[a-z]{2,63}$/.test(d); };',
+    'let s = rawSrv; let v4 = isIP(s) === 4; let v6 = v4 ? null : expandV6(s);',
+    'if (!v4 && !v6 && (rawType === "tls" || rawType === "https") && isHost(rawSrv) && rawBoot.length > 0) { s = rawBoot; v4 = isIP(s) === 4; v6 = v4 ? null : expandV6(s); }',
+    'if (!v4 && !v6) process.exit(1);',
+    'if (v4 && (s === "0.0.0.0" || s.startsWith("127."))) process.exit(1);',
+    'if (v6) {',
+    '  const z5 = v6.slice(0, 5).every((x) => x === 0);',
+    '  if (z5 && v6[5] === 0 && v6[6] === 0 && (v6[7] === 0 || v6[7] === 1)) process.exit(1);',
+    '  if (z5 && v6[5] === 0xffff && ((v6[6] === 0 && v6[7] === 0) || ((v6[6] >> 8) === 127))) process.exit(1);',
+    '}',
+    'for (const lip of lanIps) {',
+    '  if (v4 && lip === s) process.exit(1);',
+    '  if (v6) { const lv6 = expandV6(lip); if (lv6 && JSON.stringify(lv6) === JSON.stringify(v6)) process.exit(1); }',
+    '}',
+    'process.exit(0);',
+  ].join("\n"), { mode: 0o700 });
   writeFileSync(mockBox, [
     "#!/bin/sh",
     '[ "$1" = check ] && [ "$2" = -c ] || exit 90',
@@ -107,13 +166,25 @@ export function serviceApplyFixture() {
   ].join("\n"), { mode: 0o700 });
 
   return {
-    dir, config, lastGood, manifest, candidate, candidateManifest, running, dropIn, events,
+    dir, config, lastGood, manifest, candidate, candidateManifest, running, dropIn, events, cronFile, cronUpdate, cronEvents,
+    run(args: string[], overrides: Record<string, string> = {}) {
+      return spawnSync("sh", [manager, ...args], {
+        encoding: "utf8", timeout: 10_000,
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          MOCK_BOX: mockBox, MOCK_RUNNING: running, MOCK_DROP_IN: dropIn,
+          MOCK_EVENTS: events, MOCK_CRON_EVENTS: cronEvents, MOCK_CONFIG: config,
+          MOCK_DATA_DIR: join(dir, "data"), ...overrides,
+        },
+      });
+    },
     apply(overrides: Record<string, string> = {}) {
       return spawnSync("sh", [manager, "apply_config", candidate, candidateManifest], {
         encoding: "utf8", timeout: 10_000,
         env: {
           ...process.env, MOCK_BOX: mockBox, MOCK_RUNNING: running,
-          MOCK_DROP_IN: dropIn, MOCK_EVENTS: events, MOCK_CONFIG: config, MOCK_DATA_DIR: join(dir, "data"), ...overrides,
+          MOCK_DROP_IN: dropIn, MOCK_EVENTS: events, MOCK_CRON_EVENTS: cronEvents, MOCK_CONFIG: config, MOCK_DATA_DIR: join(dir, "data"), ...overrides,
         },
       });
     },
@@ -122,7 +193,7 @@ export function serviceApplyFixture() {
         encoding: "utf8", timeout: 10_000,
         env: {
           ...process.env, MOCK_BOX: mockBox, MOCK_RUNNING: running,
-          MOCK_DROP_IN: dropIn, MOCK_EVENTS: events, MOCK_CONFIG: config, MOCK_DATA_DIR: join(dir, "data"), ...overrides,
+          MOCK_DROP_IN: dropIn, MOCK_EVENTS: events, MOCK_CRON_EVENTS: cronEvents, MOCK_CONFIG: config, MOCK_DATA_DIR: join(dir, "data"), ...overrides,
         },
       });
     },

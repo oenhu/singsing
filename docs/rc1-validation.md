@@ -79,3 +79,51 @@ r3 建议用于带已知限制的预发布。RC1 验收时曾记录两项待处�
   - 修复后在全新 24.10.8 VM 实测：`opkg update && opkg install luci-app-singsing_0.1.0-r4_all.ipk` 自动从官方源安装 `kmod-tun`、`kmod-nft-tproxy`、`kmod-nft-queue`、`curl` 等全部依赖；安装后 `luci.singsing` 无需手动重启 `rpcd` 即注册就绪；`apply_config`、`singtun`、nftables `table inet sing-box`、`/tmp/dnsmasq.cfg01411c.d/dnsmasq-singsing.conf`、`sing-box.last-good.json`、Clash API（`204` 与路径拦截）、分片上传、多 Profile 与 `opkg remove` 清理（停服、撤 TUN、还原 dnsmasq、保留配置）全部通过。
 - **OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`, `apk`)**：
   - 全新 25.12.6 VM 实测：`apk update && apk add --allow-untrusted luci-app-singsing-0.1.0-r4.apk` 自动安装 9 个依赖包（含 `kmod-nft-queue`、`kmod-nft-tproxy`、`kmod-tun`、`curl`）；`rpcd` 注册、`apply_config`、`singtun`、nftables `table inet sing-box`、`dnsmasq` drop-in、`last-good`、Clash API（`204` 与安全拦截）、分片上传、多 Profile 与 `apk del` 清理全部通过。
+
+
+---
+
+### 补充验证：v0.1.3 发布修复回归（`0.1.3-r1` 复现 vs `0.1.3-r2` 验收，2026-11-27）
+
+#### 1. 原始发布包 `0.1.3-r1`（`a5ddb08`）复现记录
+在官方 OpenWrt 24.10.8 / 25.12.6 QEMU VM 实测中，原始 `0.1.3-r1` 发布包确认存在以下 4 项问题（此前 README / Release 说明中“v0.1.3 全链路通过”的表述已据此修正）：
+1. **有效 DNS 误判拒绝启动**：`service-manager.sh` 的 `check_local_dns` 入口展开 3 个空参数导致跳过 UCI，已配置有效 DNS 时 `write_config` 成功但 `service_action start` 拒绝启动。
+2. **24.10 `.ipk` 属主 `1001:1001` 污染**：打包时未优先使用 SDK `staging_dir/host/bin/tar`，归档内 `/etc`、`/etc/init.d`、`/etc/config`、`/usr` 为 `1001:1001`，装包后改写系统目录属主且卸载后残留。
+3. **首次开启 `ruleset_auto_update=1` 后 `crond` 未运行**：干净系统无历史 crontab 时 `crond` 未启动，写入 `/etc/crontabs/root` 与 `cron.update` 后任务不会自动触发。
+4. **卸载后 `luci.singsing` 仍留在 `ubus`**：卸载包后旧 `rpcd` 仍保留方法注册，需手工执行 `/etc/init.d/rpcd reload`。
+
+#### 2. 本地自动化、核心测试与 `0.1.3-r2` 安装包清单
+- **构建与静态检查**：`npm run build` 通过（`tsc --noEmit` + `engine-bundle.js`）；`sh -n`、3 个 JSON 与 11 个 LuCI JS 语法检查全部通过。
+- **常规回归测试**：`npm test` **142 项通过 / 0 失败**（较 `b06569d` 基线 139 项新增非 stub `check_local_dns` 命令入口全场景与 `cron_sync`/`cron_remove` 回归）。
+- **真实 Linux `sing-box 1.14.4` 核心测试**：`npm run test:sing-box` **9/9 通过**。
+- **SDK 打包（非 root UID 1001 环境）与 `verify-openwrt-package.sh` 属主门禁**：
+  - `luci-app-singsing_0.1.3-r2_all.ipk` — SHA-256: `ba5452deb7bbeb27445460d0139986cf69da4f90793494078cb642bbc65da092`（`data.tar.gz` 与 `control.tar.gz` 全部条目 `0/0`，含 `postrm`）
+  - `luci-app-singsing-0.1.3-r2.apk` — SHA-256: `177abd1e6d30a4d2f6f4594872cb33241fbdddce49c5a73ad628deac5fa67272`（`apk adbdump` 全部条目 `root:root`，含 `post-deinstall`）
+
+#### 3. 两套官方 OpenWrt QEMU VM（`armsr/armv8` + `sing-box 1.14.4`）验收结果
+
+| 验收项 | OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`, `opkg`) | OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`, `apk`) |
+| --- | --- | --- |
+| 安装前/后/卸载后系统目录及执行文件属主 | 通过：`/etc`、`/etc/init.d`、`/etc/config`、`/usr`、`/usr/share`、`/usr/share/rpcd` 与执行脚本全程 `0:0` | 通过：同上全程 `0:0` |
+| `check_local_dns` 实际命令入口（零参 UCI + 显式传参，16 组用例） | 通过：合法 IPv4/IPv6、空值、回环、LAN IP `192.168.1.1`、DoT/DoH 域名+引导 IP 均符合预期 | 通过：全部 16 组用例符合预期 |
+| `write_config` → `start` → `restart` → `apply_config` → 坏配置 `enabled` 回滚 | 通过：`PID 4456 → 5137`，`nofile=1000000`，Linux 6.6 `QUIC_GO_DISABLE_GSO=true`，坏配置启服失败回滚 `enabled=0` | 通过：`PID 4083 → 4761`，`nofile=1000000`，坏配置启服失败回滚 `enabled=0` |
+| 首次开启规则集定时更新与实际触发 | 通过：初始无 `crond`，启服后自动拉起 `crond`，重复同步去重仅 1 条，保留 `# keep-me-other`，**实测定时触发更新 `geoip-cn.srs`**，停服仅清理本应用条目 | 通过：同上，**实测定时触发更新 `geoip-cn.srs`**，停服保留其他条目 |
+| 整机重启自启（零人工干预） | 通过：重启后 `running: true`、`tun_up: true`、`dnsmasq_taken_over: true`、`table inet sing-box` 自动就绪 | 通过：同上自动就绪 |
+| 卸载清理与 `ubus` 注销 | 通过：`opkg remove` 清理进程/TUN/nftables/dnsmasq/cron，**`ubus list luci.singsing` 立即为空**，配置文件保留 | 通过：`apk del` 执行 `pre-deinstall` + `post-deinstall`，全部资源清理、**`ubus list luci.singsing` 立即为空**，配置文件保留 |
+| `0.1.1-r1 → 0.1.3-r2` 升级 | 通过：保留 `dns.local_server=218.104.78.2`、运行 JSON 与 `tun.strict_route=1`，补齐 `mixed`/`routing`，`tun.ipv6_mode`/`tun.mtu` 保持 `<unset>`（下次生成按 `direct`/`9000` 生效），`luci.singsing` 保持注册 | 通过：同上（`post-upgrade` 正常执行，不误触卸载注销） |
+
+#### 4. LibWrt 25.12-SNAPSHOT 真机（`192.168.21.1`）与 Debian 客户端（`192.168.21.2`）验收结果
+- **真机升级与 ACL**：`0.1.1-r1 → 0.1.3-r2` 覆盖升级成功，原有配置/JSON SHA-256 保持不变，`uhttpd` 静态资源 HTTP 200，`rpcd` 登录会话对 `status`/`write_config`/`apply_config`/`clash_api` 均返回 `access: true`，系统目录属主全为 `0:0`。
+- **4 模式实际出口与 `mixed-in`**：通过 Clash API 热切验证 `Non-CN`（`www.baidu.com`/`223.5.5.5` 直连、`example.com`/`1.1.1.1` 走 `proxy-a`）、`GFWList`（`www.google.com` 走 `proxy-a`、`example.com`/`www.baidu.com` 直连）、`Global`（全走 `proxy-a`）、`Direct`（全直连）全部命中预期；`mixed-in`（`:5330`）HTTP 与 SOCKS5 均成功经 `proxy-a` 出口。
+- **原生测速（本地可信 HTTPS）**：对可信 HTTPS 端点 `https://192.168.21.2:18443/generate_204` 实测单节点（`proxy-a`、`proxy-b`）与代理组（`/group/proxy/delay` → `{"auto":66,"proxy-a":27,"proxy-b":66}`）均返回 HTTP 200 实际延迟。
+- **规则优先级实测矩阵（`port_mode=common`/`custom(80,443)` 与 `block_quic=1`）**：
+  - 默认代理（`1.1.1.1`）：允许端口（80 / 8080）走 `proxy-a`，非代理端口（9999）绕过直连，UDP 443 被 `block_quic` 返回 ICMP 拒断。
+  - 显式 `s.rules` 代理（`1.0.0.1`、`example.org`）：**非代理端口 9999 仍走 `proxy-a`，UDP 443 仍走 `proxy-a`（不受端口过滤和 `block_quic` 拦截）**。
+  - 设备指定代理（`deviceRules -> proxy-b`）：**非代理端口 9999 仍走 `proxy-b`，UDP 443（含 `1.1.1.1` 与 `223.5.5.5`）仍走 `proxy-b`（不受端口过滤和 `block_quic` 拦截）**。
+  - 显式直连 / CN 直连（`9.9.9.9`、`www.baidu.com`、`223.5.5.5`）：直连且 UDP 443 不被 `block_quic` 拒断。
+  - *注：因存在多种合理语义，本轮保持现有优先级不变，已整理最小调整方案供维护者决策。*
+- **MAC 规则冲突与访问控制**：启用 `find_neighbor: true`，Debian 真实 MAC（`28:75:d8:8a:80:03`）配置 `deviceRules -> proxy-b` 时优先于冲突的 `s.rules`（`example.com -> proxy-a`、`1.0.0.1 -> direct`）；MAC 黑名单与白名单（含未列入/已列入对照）均按预期生效。
+- **DNS 容灾与防泄漏**：DoH 域名 + 引导 IP（`dns.alidns.com` + `223.5.5.5`）解析正常；`sing-box` `dns-in`（`:5335`）对 `.lan` 与单标签主机返回 `NXDOMAIN`；`local_backup_server` 在主 DNS 返回 `SERVFAIL` 及丢包超时两种故障下均自动回退备用 DNS；`Non-CN` 远程 DNS 返回 `SERVFAIL` 时安全回落 `local`。
+- **IPv6 PD 续租与 WAN 重拨**：`ipv6_mode=direct` 下国内 AAAA 与 IPv6 直连 TLS（`2400:3200::1:443`）通过，代理域名 `example.com` AAAA 受 `allow_proxy_ipv6=0` 抑制；`ipv6_mode=ipv4_only` 抑制国内 AAAA；`ifup WAN` 重拨后前缀由 `2408:8244:310:1c98::/64` 续租切换至新前缀并保持 IPv6 直连可用。**待改进观察**：因该 LibWrt 将逻辑 WAN 接口命名为大写 `WAN`（而非小写 `wan`），`ifup WAN` 未命中当前硬编码的 `"wan"` procd trigger，且 `wan_dns` 返回空数组；手工执行 `service-manager.sh reload_if_running` 可正常平滑重载。
+- **自建 Headscale 子网与 Exit Node 转发**：在 Debian 自建 Headscale `v0.29.8`（本地可信 HTTPS 嵌入式 DERP），路由器以 `0600` 持久化状态注册上线并通告子网 `10.199.99.0/24` 与 Exit Node（`0.0.0.0/0`、`::/0`）；批准路由后，Debian 对端节点经 Tailscale 隧道成功访问路由器通告子网 `10.199.99.1:80`（HTTP 200）、经 Exit Node 代理转发 `1.1.1.1:80`（`VIA=proxy-a`）、直连转发 `223.5.5.5:80`（HTTP 404）以及 53 端口 TCP DNS 接管（`rcode=0, ancount=1`）。
+- **整机重启自启与现场还原**：执行 `/sbin/reboot` 核对新 `boot_id`（`4f777a96-... → 24cf2749-...`），无需人工干预自动恢复 `sing-box`、`singtun`、`dnsmasq` 接管与 `table inet sing-box`，Debian 直连 HTTP 200；验证结束后完整还原备份（4 项基线文件 SHA-256 与测试前完全一致）、清理测试临时文件并复核两台设备 SSH 与外网连通性。
