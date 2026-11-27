@@ -79,7 +79,7 @@ return view.extend({
 		o = s.option(form.Value, 'ruleset_download_prefix', '规则集下载加速前缀（可选）', '例如 https://ghfast.top/ ；用于首次无代理时自动下载 GitHub 规则集，留空则直连 GitHub');
 		o.placeholder = '留空直连 GitHub';
 
-		o = s.option(form.Flag, 'ruleset_auto_update', '定时自动更新本地规则集', '启用后使用 OpenWrt 系统 crond 按计划自动更新已配置的本地规则集（仅在服务启用时生效）');
+		o = s.option(form.Flag, 'ruleset_auto_update', '定时自动更新本地规则集', '服务启用时由 OpenWrt 系统 cron 定时更新规则集。系统 cron 停止且关闭开机自启时，任务会等待 cron 启动。');
 		o.default = '0';
 		o.rmempty = false;
 
@@ -299,7 +299,7 @@ return view.extend({
 		o.value('geosite-geolocation-cn', 'geosite-geolocation-cn（上游默认，仅中国大陆站点）');
 		o.default = 'geosite-cn';
 
-		o = s.option(form.ListValue, 'port_mode', '代理目的端口范围', '绕过非代理端口可避免 BT/PT/游戏 P2P 大流量进入代理或用户态');
+		o = s.option(form.ListValue, 'port_mode', '代理目的端口范围', '仅限制默认分流的代理端口，其他端口直连。设备指定代理与自定义代理规则优先，仍可代理这些端口。');
 		o.value('all', '全部端口');
 		o.value('common', '仅常用端口（20-25,53,80,443,8080,8443 等）');
 		o.value('custom', '自定义端口 / 端口段');
@@ -309,7 +309,7 @@ return view.extend({
 		o.placeholder = '例如 80,443,8000-8999';
 		o.depends('port_mode', 'custom');
 
-		o = s.option(form.Flag, 'block_quic', '阻断代理流量的 QUIC（UDP 443）', '仅对走代理的海外 UDP 443 返回拒绝以回退 TCP/TLS，不影响微信/B站等国内 QUIC');
+		o = s.option(form.Flag, 'block_quic', '阻断默认代理的 UDP 443（QUIC）', '拒绝默认分流中走代理的 UDP 443，便于应用回退到 TCP/TLS。直连、设备指定代理和自定义代理规则仍按原规则转发。');
 		o.default = '0';
 		o.rmempty = false;
 

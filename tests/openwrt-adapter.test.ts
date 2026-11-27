@@ -562,28 +562,41 @@ describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces
     ).toBe("route:proxy");
   });
 
-  it("supports common/custom routing port filtering and proxied-only QUIC (UDP 443) rejection", () => {
+  it.each([
+    ["common", true],
+    ["common", false],
+    ["custom", true],
+    ["custom", false],
+  ] as const)("applies %s port filtering and UDP 443 rejection to fallback routes (pre-match bypass %s)", (portMode, bypassCn) => {
+    const p = blueprintProfile();
+    p.settings.rules = [newRule({ outbound: "proxy", lines: ["203.0.113.10"] })];
     const s = validSettings({
       routing: {
         ...defaultOpenWrtRoutingSettings(),
-        portMode: "custom",
+        portMode,
+        bypassCn,
         customPorts: "80,443,8000-8999",
         blockQuic: true,
       },
+      accessControl: {
+        mode: "all",
+        clients: [],
+        deviceRules: [{ id: "tv", name: "TV", clients: ["192.168.1.88"], outbound: "auto", enabled: true }],
+      },
     });
-    const { config, issues } = generateOpenWrtConfig(blueprintProfile(), s) as any;
+    const { config, issues } = generateOpenWrtConfig(p, s) as any;
     expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
     expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
 
-    // Non-proxy high port (BT/P2P 51413) bypasses on tun-in and goes direct post-sniff
-    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 51413, mode: "Non-CN" })).toBe("bypass");
-    expect(routeWalk(config, { inbound: "mixed-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 51413, mode: "Non-CN" })).toBe("route:direct");
-    // Port inside custom range proxies
-    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 8443, mode: "Non-CN" })).toBe("route:proxy");
-
-    // Proxied QUIC (UDP 443 to foreign IP) is rejected, while domestic QUIC bypasses
-    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 443, network: "udp", mode: "Non-CN" })).toBe("reject");
-    expect(routeWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "223.5.5.5", cn: true, port: 443, network: "udp", mode: "Non-CN" })).toBe("bypass");
+    const traffic = { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", mode: "Non-CN" as const };
+    const direct = bypassCn ? "bypass" : "route:direct";
+    expect(routeWalk(config, { ...traffic, port: 8443 })).toBe("route:proxy");
+    for (const packet of [{ port: 51413, network: "tcp" }, { port: 443, network: "udp" }] as const) {
+      expect(routeWalk(config, { ...traffic, ...packet })).toBe(packet.network === "udp" ? "reject" : direct);
+      expect(routeWalk(config, { ...traffic, ...packet, ip: "203.0.113.10" })).toBe("route:proxy");
+      expect(routeWalk(config, { ...traffic, ...packet, ip: "203.0.113.10", sourceIp: "192.168.1.88" })).toBe("route:auto");
+      expect(routeWalk(config, { ...traffic, ...packet, ip: "223.5.5.5", cn: true })).toBe(direct);
+    }
   });
 
   it("supports routeExcludeCn, includeInterface, defaultInterface, udpTimeout, and optional mixed-in inbound", () => {

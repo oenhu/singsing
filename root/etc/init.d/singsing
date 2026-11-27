@@ -114,9 +114,3 @@ reload_service() {
 	stop
 	start
 }
-
-service_triggers() {
-	# Reload running sing-box on WAN interface up (e.g. PPPoE redial / prefix refresh).
-	# Intentionally omit procd_add_reload_trigger for UCI to avoid race conditions with apply_config.
-	procd_add_interface_trigger "interface.*.up" wan /usr/share/singsing/service-manager.sh reload_if_running
-}

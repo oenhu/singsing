@@ -105,7 +105,7 @@ for cleanup in '/etc/init.d/singsing stop' 'service-manager.sh dnsmasq_restore' 
 	grep -Fq "$cleanup" "$remove_hook"
 done
 
-for path in etc/init.d/singsing etc/uci-defaults/99-singsing usr/share/singsing/service-manager.sh; do
+for path in etc/init.d/singsing etc/hotplug.d/iface/95-singsing etc/uci-defaults/99-singsing usr/share/singsing/service-manager.sh; do
 	test -x "$work/files/$path"
 	sh -n "$work/files/$path"
 	cmp "$source_dir/root/$path" "$work/files/$path"

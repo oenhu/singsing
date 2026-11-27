@@ -127,3 +127,18 @@ r3 建议用于带已知限制的预发布。RC1 验收时曾记录两项待处�
 - **IPv6 PD 续租与 WAN 重拨**：`ipv6_mode=direct` 下国内 AAAA 与 IPv6 直连 TLS（`2400:3200::1:443`）通过，代理域名 `example.com` AAAA 受 `allow_proxy_ipv6=0` 抑制；`ipv6_mode=ipv4_only` 抑制国内 AAAA；`ifup WAN` 重拨后前缀由 `2408:8244:310:1c98::/64` 续租切换至新前缀并保持 IPv6 直连可用。**待改进观察**：因该 LibWrt 将逻辑 WAN 接口命名为大写 `WAN`（而非小写 `wan`），`ifup WAN` 未命中当前硬编码的 `"wan"` procd trigger，且 `wan_dns` 返回空数组；手工执行 `service-manager.sh reload_if_running` 可正常平滑重载。
 - **自建 Headscale 子网与 Exit Node 转发**：在 Debian 自建 Headscale `v0.29.8`（本地可信 HTTPS 嵌入式 DERP），路由器以 `0600` 持久化状态注册上线并通告子网 `10.199.99.0/24` 与 Exit Node（`0.0.0.0/0`、`::/0`）；批准路由后，Debian 对端节点经 Tailscale 隧道成功访问路由器通告子网 `10.199.99.1:80`（HTTP 200）、经 Exit Node 代理转发 `1.1.1.1:80`（`VIA=proxy-a`）、直连转发 `223.5.5.5:80`（HTTP 404）以及 53 端口 TCP DNS 接管（`rcode=0, ancount=1`）。
 - **整机重启自启与现场还原**：执行 `/sbin/reboot` 核对新 `boot_id`（`4f777a96-... → 24cf2749-...`），无需人工干预自动恢复 `sing-box`、`singtun`、`dnsmasq` 接管与 `table inet sing-box`，Debian 直连 HTTP 200；验证结束后完整还原备份（4 项基线文件 SHA-256 与测试前完全一致）、清理测试临时文件并复核两台设备 SSH 与外网连通性。
+### 补充验证：`0.1.3-r3` 本地候选（2026-11-27）
+
+本轮基线为 `b5308d1`。两套 OpenWrt 正式 SDK 构建和包检查通过。运行验证使用 Debian 上的 QEMU/KVM，固件为官方 OpenWrt 24.10.8（6.6.144，opkg）和 25.12.6（6.12.112，apk），两者均为 `x86/64` 并运行 sing-box 1.14.4。构建通过，150 项常规测试和 9 项真实核心测试通过。
+
+| 安装包 | SHA-256 |
+| --- | --- |
+| `luci-app-singsing_0.1.3-r3_all.ipk` | `4676559ab888114affc09f7d52367bda3cbfa0cd5fb1def06e65f66e59a2dd3c` |
+| `luci-app-singsing-0.1.3-r3.apk` | `f06dd7f99e796b4ddca3dd1624bcf768f056e2cfb3adc557e94477853a41ac27` |
+
+- **规则集定时更新**。两版 VM 都由 `crond` 实际下载并替换了规则集，重复同步只有一条本应用任务。24.10 上验证了系统 cron 已启用但首次开机没有实例时自动启动，以及原生启动失败时记录日志且 sing-box 正常运行。25.12 上验证了 cron 开机自启关闭时任务等待，手动启动 cron 后任务执行，开机自启设置在重启和卸载后继续保持关闭。其他任务保持原样。
+- **WAN 事件与 DNS 提示**。`wan`、`WAN`、`fiber_main` 和 `WAN_6` 的实际 `ifup` 事件均触发了运行中的核心重载。通过 PID、TUN、dnsmasq、DNS 查询和 Mixed HTTP 请求验证重载恢复。无默认上联网口时 `wan_dns` 为空，访客接口上线和停机后的 WAN 上线保持原有进程状态。`status` 与 `dns_check` 均返回去重后的 WAN DNS，过滤了回环及路由器自身地址。
+- **端口与 QUIC**。常规测试覆盖 common/custom、开启与关闭内核 bypass、默认代理与直连、设备指定代理和显式代理。LuCI 文案与既有规则优先级一致。
+- **发布门槛**。两版均复测目录属主、有效 DNS 启动、重启自启、坏配置启动回滚、运行期配置应用失败回滚，以及卸载后清理 RPC、TUN、dnsmasq 接管和热插拔脚本。两版运行中的 `0.1.3-r2 → 0.1.3-r3` 升级均保留配置和运行服务，旧 procd WAN 触发器完成注销。
+
+真机待复测实际 PPPoE 重拨和运营商 IPv6 PD 续租。本轮覆盖 OpenWrt `ifup`，仅产生 `ifupdate` 的续租场景另行记录。

@@ -28,6 +28,7 @@ export function serviceApplyFixture() {
   const events = join(dir, "events");
   const mockBox = join(dir, "sing-box-mock");
   const manager = join(dir, "service-manager.sh");
+  const network = join(dir, "network.sh");
   const source = readFileSync(new URL("../root/usr/share/singsing/service-manager.sh", import.meta.url), "utf8")
     .replace(/\/etc\/init\.d\/(singsing|sing-box|dnsmasq|cron)/g, initDir + "/$1")
     .replace('CONF_DIR="/etc/singsing"', 'CONF_DIR="' + configDir + '"')
@@ -35,6 +36,7 @@ export function serviceApplyFixture() {
     .replace('TMP_DIR="/tmp/singsing"', 'TMP_DIR="' + runtimeDir + '"')
     .replace('CRON_FILE="/etc/crontabs/root"', 'CRON_FILE="' + cronFile + '"')
     .replace('CRON_LOCK="/var/lock/root-crontab"', 'CRON_LOCK="' + cronLock + '"')
+    .replaceAll("/lib/functions/network.sh", network)
     .replaceAll("/tmp/dnsmasq.d/", dnsDir + "/")
     .replaceAll("/tmp/dnsmasq.*.d/", dnsDir + "/*/");
   const dispatch = source.lastIndexOf('\ncase "\u0024{1:-}" in');
@@ -56,7 +58,6 @@ export function serviceApplyFixture() {
     '  esac',
     '}',
     'if [ "\u0024{MOCK_REAL_CHECK_DNS:-0}" != "1" ]; then check_local_dns() { return 0; }; fi',
-    'if [ "\u0024{MOCK_CRON_RUNNING_MODE:-}" = "running" ]; then is_cron_running() { return 0; }; elif [ "\u0024{MOCK_CRON_RUNNING_MODE:-}" = "stopped" ]; then is_cron_running() { return 1; }; fi',
     'flock() { return 0; }',
     'ensure_rulesets() { return 0; }',
     'get_service_pid() { if [ -f "$MOCK_RUNNING" ]; then printf 123; fi; }',
@@ -83,14 +84,32 @@ export function serviceApplyFixture() {
     '}',
     'ss() { :; }',
     'sleep() { :; }',
+    'logger() { printf "%s\\n" "$*" >&2; }',
   ].join("\n");
   writeFileSync(manager, source.slice(0, dispatch) + "\n" + stubs + source.slice(dispatch), { mode: 0o700 });
   writeFileSync(join(initDir, "cron"), [
     "#!/bin/sh",
     'printf "cron:%s\\n" "$1" >> "$MOCK_CRON_EVENTS"',
-    'if [ "$1" = "enabled" ]; then exit "${MOCK_CRON_INIT_ENABLED:-1}"; fi',
-    "exit 0",
+    'case "$1" in',
+    '  running) [ "${MOCK_CRON_RUNNING_MODE:-}" = "running" ] ||',
+    '    { grep -Fxq "cron:start" "$MOCK_CRON_EVENTS" && [ "${MOCK_CRON_AFTER_START_STATUS:-0}" = "0" ]; } ;;',
+    '  enabled) exit "${MOCK_CRON_INIT_ENABLED:-0}" ;;',
+    '  start) exit "${MOCK_CRON_START_STATUS:-0}" ;;',
+    '  *) exit 1 ;;',
+    'esac',
   ].join("\n"), { mode: 0o700 });
+  writeFileSync(network, [
+    'network_flush_cache() { :; }',
+    'network_find_wan() { export "$1=${MOCK_WAN4:-}"; }',
+    'network_find_wan6() { export "$1=${MOCK_WAN6:-}"; }',
+    'network_get_dnsserver() {',
+    '  case "$2" in',
+    '    "${MOCK_WAN4:-}") export "$1=${MOCK_WAN4_DNS:-}" ;;',
+    '    "${MOCK_WAN6:-}") export "$1=${MOCK_WAN6_DNS:-}" ;;',
+    '    *) return 1 ;;',
+    '  esac',
+    '}',
+  ].join("\n"));
   // Lightweight ucode shim for check_local_dns dispatch tests on hosts without OpenWrt ucode
   writeFileSync(join(binDir, "ucode"), [
     "#!/usr/bin/env node",

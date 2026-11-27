@@ -44,6 +44,7 @@ jobs:
         run: |
           sh -n root/usr/share/singsing/service-manager.sh
           sh -n root/etc/init.d/singsing
+          sh -n root/etc/hotplug.d/iface/95-singsing
           sh -n root/etc/uci-defaults/99-singsing
           node -e '
             const fs = require("fs");

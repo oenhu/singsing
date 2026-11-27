@@ -586,6 +586,35 @@ reload_if_running() {
 	) 9>"$LOCK_FILE"
 }
 
+for_wan_interfaces() (
+	[ -r /lib/functions/network.sh ] || return 0
+	# OpenWrt's network helpers use unset variables for optional arguments and caching.
+	set +u
+	. /lib/functions/network.sh
+	network_flush_cache
+
+	local wan4 wan6
+	network_find_wan wan4 2>/dev/null
+	network_find_wan6 wan6 2>/dev/null
+	[ -z "$wan4" ] || "$@" "$wan4"
+	[ -z "$wan6" ] || [ "$wan6" = "$wan4" ] || "$@" "$wan6"
+	return 0
+)
+
+print_wan_dns() {
+	local servers
+	if network_get_dnsserver servers "$1" 2>/dev/null; then
+		printf '%s\n' "$servers"
+	fi
+}
+
+wan_ifup() {
+	[ -n "${1:-}" ] || return 0
+	if for_wan_interfaces printf '%s\n' | grep -Fxq -- "$1"; then
+		reload_if_running
+	fi
+}
+
 wait_dns_ready() {
 	local port tun_iface timeout i pid has_sock_tool=0
 	port="$(get_config_dns_field listen_port)" || return 1
@@ -864,29 +893,6 @@ validate_cron_expr() {
 		validate_cron_field "$5" 0 6
 }
 
-is_cron_running() {
-	if command -v ubus >/dev/null 2>&1 && command -v ucode >/dev/null 2>&1; then
-		local running
-		running="$(ubus call service list '{"name":"cron"}' 2>/dev/null | ucode -e '
-			import { stdin } from "fs";
-			let d = null;
-			try { d = json(stdin.read("all") || "{}"); } catch (e) { d = null; }
-			let instances = d?.["cron"]?.instances || {};
-			for (let k, inst in instances) {
-				if (inst && inst.running && inst.pid) {
-					print("1");
-					exit(0);
-				}
-			}
-		' 2>/dev/null || true)"
-		[ "$running" = "1" ] && return 0
-	fi
-	if command -v pidof >/dev/null 2>&1 && pidof crond >/dev/null 2>&1; then
-		return 0
-	fi
-	return 1
-}
-
 cron_configure() {
 	local want_enabled="$1" expr="$2"
 	local cron_dir lock_dir tmp="" changed=0 wrote_entry=0
@@ -919,7 +925,7 @@ cron_configure() {
 
 		if [ "$want_enabled" = "1" ]; then
 			if validate_cron_expr "$expr"; then
-				printf '%s /usr/share/singsing/service-manager.sh update_rulesets >/dev/null 2>&1 %s\n' "$expr" "$CRON_TAG" >> "$tmp"
+			printf '%s /usr/share/singsing/service-manager.sh update_rulesets >/dev/null 2>&1 %s\n' "$expr" "$CRON_TAG" >> "$tmp" || exit 1
 				wrote_entry=1
 			else
 				logger -t singsing -p daemon.warn "Ignoring invalid ruleset_update_cron expression: $expr"
@@ -946,14 +952,18 @@ cron_configure() {
 	)
 	local rc=$?
 	if [ "$rc" -eq 0 ]; then
-		# On a clean OpenWrt system with no prior crontabs, /etc/init.d/cron exits early at boot
-		# without spawning crond. Start native cron only when no crond instance is running yet;
-		# if crond is already running, cron.update above safely notifies it without restarting crond.
-		if ! is_cron_running && [ -x /etc/init.d/cron ]; then
-			/etc/init.d/cron enabled >/dev/null 2>&1 || /etc/init.d/cron enable >/dev/null 2>&1 || true
-			/etc/init.d/cron start >/dev/null 2>&1 || true
+		# A running cron reads cron.update. On clean systems cron may be enabled
+		# at boot but have no running instance until the first crontab is written.
+		/etc/init.d/cron running >/dev/null 2>&1 && return 0
+		if ! /etc/init.d/cron enabled >/dev/null 2>&1; then
+			logger -t singsing -p daemon.warn "Scheduled rule-set updates are waiting for system cron to start"
+			return 0
 		fi
-		return 0
+		if /etc/init.d/cron start >/dev/null 2>&1 && /etc/init.d/cron running >/dev/null 2>&1; then
+			return 0
+		fi
+		logger -t singsing -p daemon.warn "Could not start system cron for scheduled rule-set updates"
+		return 1
 	fi
 	[ "$rc" -eq 3 ] && return 0
 	return "$rc"
@@ -986,13 +996,15 @@ case "${1:-}" in
 	cron_sync)              cron_sync ;;
 	cron_remove)            cron_remove ;;
 	reload_if_running)      reload_if_running ;;
+	wan_ifup)               wan_ifup "${2:-}" ;;
+	wan_dns)                for_wan_interfaces print_wan_dns ;;
 	validate_config)        shift; validate_config "$@" ;;
 	wait_dns_ready)         shift; wait_dns_ready "$@" ;;
 	wait_service_stopped)   wait_service_stopped ;;
 	write_config)           shift; write_config "$@" ;;
 	apply_config)           shift; apply_config "$@" ;;
 	*)
-		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|cron_sync|cron_remove|reload_if_running|validate_config|wait_dns_ready|write_config|apply_config}\n' "$0" >&2
+		printf 'Usage: %s {ensure_dirs|disable_stock_singbox|check_local_dns|dnsmasq_takeover|dnsmasq_restore|ensure_rulesets|update_rulesets|cron_sync|cron_remove|reload_if_running|wan_ifup|wan_dns|validate_config|wait_dns_ready|write_config|apply_config}\n' "$0" >&2
 		exit 1
 		;;
 esac

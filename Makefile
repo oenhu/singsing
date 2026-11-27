@@ -6,7 +6,7 @@ LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-singsing
 PKG_VERSION:=0.1.3
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=MIT
 
 define Package/$(PKG_NAME)/conffiles

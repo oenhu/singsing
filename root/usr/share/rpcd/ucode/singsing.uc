@@ -238,12 +238,9 @@ function getWanDns(lanIps) {
 		push(servers, v);
 	};
 
-	for (let ifc in ['wan', 'wan6']) {
-		let u = runCmd(`ubus call network.interface.${ifc} status 2>/dev/null`);
-		if (u.code != 0 || length(u.output) == 0) continue;
-		let d = safeJson(u.output);
-		for (let s in (d?.['dns-server'] || [])) addDns(s);
-	}
+	let result = runCmd(`${SERVICE_MGR} wan_dns`);
+	if (result.code == 0)
+		for (let server in split(result.output, /[[:space:]]+/)) addDns(server);
 	return servers;
 }
 

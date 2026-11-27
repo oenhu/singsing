@@ -208,31 +208,94 @@ describe("service-manager cron_sync and cron_remove lifecycle", () => {
       MOCK_CRON_ENABLED: "1",
       MOCK_CRON_EXPR: "*/5 * * * *",
       MOCK_CRON_RUNNING_MODE: "stopped",
-      MOCK_CRON_INIT_ENABLED: "1",
+      MOCK_CRON_INIT_ENABLED: "0",
     });
     expect(first.status).toBe(0);
     const crontab1 = read(f.cronFile);
     expect(crontab1).toContain("/usr/bin/other-job # other");
     expect(crontab1.split("\n").filter((l) => l.includes("# singsing-ruleset"))).toHaveLength(1);
     expect(read(f.cronUpdate)).toContain("root");
-    expect(read(f.cronEvents)).toContain("cron:enable\ncron:start\n");
+    expect(read(f.cronEvents)).toBe("cron:running\ncron:enabled\ncron:start\ncron:running\n");
 
-    // Repeated sync while crond is already running keeps single entry and does not restart cron
+    // A manually started daemon still reads the schedule with boot disabled.
     writeFileSync(f.cronEvents, "");
     const second = f.run(["cron_sync"], {
       MOCK_ENABLED: "1",
       MOCK_CRON_ENABLED: "1",
       MOCK_CRON_EXPR: "*/5 * * * *",
       MOCK_CRON_RUNNING_MODE: "running",
+      MOCK_CRON_INIT_ENABLED: "1",
     });
     expect(second.status).toBe(0);
     expect(read(f.cronFile).split("\n").filter((l) => l.includes("# singsing-ruleset"))).toHaveLength(1);
-    expect(read(f.cronEvents)).toBe("");
+    expect(read(f.cronEvents)).toBe("cron:running\n");
 
     // cron_remove strips only singsing entry and preserves unrelated jobs
     const removed = f.run(["cron_remove"], { MOCK_CRON_RUNNING_MODE: "running" });
     expect(removed.status).toBe(0);
     expect(read(f.cronFile)).toContain("/usr/bin/other-job # other");
     expect(read(f.cronFile)).not.toContain("# singsing-ruleset");
+  });
+
+  it("keeps the task pending when system cron is disabled and stopped", () => {
+    const result = f.run(["cron_sync"], {
+      MOCK_CRON_ENABLED: "1",
+      MOCK_CRON_INIT_ENABLED: "1",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("waiting for system cron to start");
+    expect(read(f.cronFile)).toContain("# singsing-ruleset");
+    expect(read(f.cronEvents)).toBe("cron:running\ncron:enabled\n");
+  });
+
+  it("reports a failed native cron start while retaining the schedule", () => {
+    const result = f.run(["cron_sync"], {
+      MOCK_CRON_ENABLED: "1",
+      MOCK_CRON_START_STATUS: "1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Could not start system cron");
+    expect(read(f.cronFile)).toContain("# singsing-ruleset");
+    expect(read(f.cronEvents)).toBe("cron:running\ncron:enabled\ncron:start\n");
+  });
+
+  it("reports that cron never started even if the init command returned success", () => {
+    const result = f.run(["cron_sync"], {
+      MOCK_CRON_ENABLED: "1",
+      MOCK_CRON_AFTER_START_STATUS: "1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Could not start system cron");
+    expect(read(f.cronFile)).toContain("# singsing-ruleset");
+    expect(read(f.cronEvents)).toBe("cron:running\ncron:enabled\ncron:start\ncron:running\n");
+  });
+});
+
+describe("service-manager WAN integration", () => {
+  const upstream = {
+    MOCK_WAN4: "WAN",
+    MOCK_WAN6: "uplink6",
+    MOCK_WAN4_DNS: "192.0.2.53 192.0.2.54",
+    MOCK_WAN6_DNS: "2001:db8::53",
+  };
+
+  it("reads DNS from each default uplink, querying a shared interface only once", () => {
+    expect(f.run(["wan_dns"], upstream).stdout).toBe("192.0.2.53 192.0.2.54\n2001:db8::53\n");
+    expect(f.run(["wan_dns"], { ...upstream, MOCK_WAN6: "WAN" }).stdout).toBe("192.0.2.53 192.0.2.54\n");
+    expect(f.run(["wan_dns"]).stdout).toBe("");
+  });
+
+  it("restarts only a running service on an event for a current default uplink", () => {
+    writeFileSync(f.events, "");
+    expect(f.run(["wan_ifup", "WAN"], upstream).status).toBe(0);
+    expect(read(f.events)).toBe("");
+    writeFileSync(f.running, "5335");
+    expect(f.run(["wan_ifup", "guest"], upstream).status).toBe(0);
+    expect(f.run(["wan_ifup", "WAN"]).status).toBe(0);
+    expect(read(f.events)).toBe("");
+    expect(f.run(["wan_ifup", "WAN"], upstream).status).toBe(0);
+    expect(read(f.events)).toBe("start-previous\n");
+    expect(f.run(["wan_ifup", "uplink6"], upstream).status).toBe(0);
+    expect(read(f.events)).toBe("start-previous\nstart-previous\n");
   });
 });
