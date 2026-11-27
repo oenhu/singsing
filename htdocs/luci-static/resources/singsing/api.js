@@ -221,7 +221,8 @@ function readOpenWrtSettings(lanIps) {
 				listenPort: portNum('dns', 'listen_port', 5335),
 				hijack: bool('dns', 'hijack', true),
 				dnsmasqManage: bool('dns', 'dnsmasq_manage', true),
-				allowProxyIpv6: bool('dns', 'allow_proxy_ipv6', false)
+				allowProxyIpv6: bool('dns', 'allow_proxy_ipv6', false),
+				nonCnStrategy: get('dns', 'non_cn_strategy', 'remote_verify')
 			},
 			tun: {
 				enabled: bool('tun', 'enabled', true),
@@ -250,6 +251,8 @@ function readOpenWrtSettings(lanIps) {
 				cnSiteRuleset: get('routing', 'cn_site_ruleset', 'geosite-cn'),
 				portMode: get('routing', 'port_mode', 'all'),
 				customPorts: get('routing', 'custom_ports', ''),
+				udpPortMode: get('routing', 'udp_port_mode', 'follow'),
+				customUdpPorts: get('routing', 'custom_udp_ports', ''),
 				blockQuic: bool('routing', 'block_quic', false)
 			},
 			paths: {

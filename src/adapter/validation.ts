@@ -6,16 +6,20 @@ import {
   type CnSiteRuleset,
   type DirectDnsType,
   type Ipv6Mode,
+  type NonCnDnsStrategy,
   type OpenWrtSettings,
   type RoutingPortMode,
+  type UdpPortMode,
 } from "./types";
 
 const IPV4_RE = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z]{2,63}$/i;
 const DIRECT_DNS_TYPES: readonly DirectDnsType[] = ["udp", "tcp", "tls", "https"];
+const NON_CN_DNS_STRATEGIES: readonly NonCnDnsStrategy[] = ["remote_verify", "race"];
 const IPV6_MODES: readonly Ipv6Mode[] = ["direct", "auto", "ipv4_only"];
 const CN_SITE_RULESETS: readonly CnSiteRuleset[] = ["geosite-cn", "geosite-geolocation-cn"];
 const PORT_MODES: readonly RoutingPortMode[] = ["all", "common", "custom"];
+const UDP_PORT_MODES: readonly UdpPortMode[] = ["follow", "all", "common", "custom"];
 const IFACE_RE = /^[a-zA-Z0-9_.:-]{1,15}$/;
 const DURATION_RE = /^\d+(ms|s|m|h)$/;
 const OPENWRT_RESERVED_TAGS = ["dns-in", "mixed-in", "local-bootstrap", "local-backup"];
@@ -201,6 +205,9 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
   if (!DIRECT_DNS_TYPES.includes(dns.localType)) {
     err(`直连上游 DNS 协议必须是 ${DIRECT_DNS_TYPES.join(" / ")} 之一`);
   }
+  if (dns.nonCnStrategy && !NON_CN_DNS_STRATEGIES.includes(dns.nonCnStrategy)) {
+    err(`Non-CN DNS 策略无效：${dns.nonCnStrategy}`);
+  }
 
   const server = dns.localServer.trim();
   const bootstrap = (dns.localBootstrap || "").trim();
@@ -313,6 +320,17 @@ export function validateOpenWrtSettings(settings: OpenWrtSettings): Issue[] {
       const parsed = parseRoutingPorts(COMMON_ROUTING_PORTS);
       if (parsed.ports.length === 0 && parsed.ranges.length === 0) {
         err("常用代理端口列表为空");
+      }
+    }
+    const udpMode = routing.udpPortMode ?? "follow";
+    if (!UDP_PORT_MODES.includes(udpMode)) {
+      err(`UDP 代理端口范围模式无效：${udpMode}`);
+    } else if (udpMode === "custom") {
+      const parsed = parseRoutingPorts(routing.customUdpPorts || "");
+      if (parsed.invalid.length > 0) {
+        err(`自定义 UDP 代理端口格式无效：${parsed.invalid.join("、")}`);
+      } else if (parsed.ports.length === 0 && parsed.ranges.length === 0) {
+        err("已选择「自定义 UDP 代理端口」，请至少填写一个端口或端口段（例如 53,443,3478-3481）");
       }
     }
   }

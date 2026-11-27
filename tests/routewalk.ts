@@ -144,3 +144,49 @@ export function routeWalk(config: Json, c: Connection): string {
   }
   return `route:${config.route.final}`;
 }
+
+/**
+ * Simulates Linux `auto_redirect` pre-match (NFQUEUE) evaluation:
+ * - For TCP, stops upon reaching `{ action: "sniff" }` (SYN has no payload).
+ * - Returns `"bypass"`, `"reject"`, `"route:<outbound>"`, or `"userspace"` if it falls into TUN.
+ */
+export function preMatchWalk(config: Json, c: Connection): string {
+  const net = c.network ?? "tcp";
+  for (const rule of config.route.rules) {
+    if (rule.action === "sniff") {
+      if (net === "tcp") return "userspace";
+      continue;
+    }
+    if (!matches(rule, config, c)) continue;
+    if (rule.action === "bypass") return "bypass";
+    if (rule.action === "reject") return "reject";
+    return "userspace";
+  }
+  return "userspace";
+}
+
+/**
+ * Simulates normal userspace `RouteConnectionEx` evaluation:
+ * - Skips pure `action: "bypass"` rules (no `outbound`), matching sing-box 1.13+ semantics.
+ * - Tracks whether the flow passed through `{ action: "sniff" }` and whether it hit `hijack-dns`.
+ */
+export function userspaceWalk(config: Json, c: Connection): { action: string; sniffed: boolean; hijackedDns: boolean } {
+  let sniffed = false;
+  for (const rule of config.route.rules) {
+    if (rule.action === "bypass" && !rule.outbound) continue;
+    if (rule.action === "sniff") {
+      sniffed = true;
+      continue;
+    }
+    if (!matches(rule, config, c)) continue;
+    if (rule.action === "hijack-dns") {
+      return { action: "hijack-dns", sniffed, hijackedDns: true };
+    }
+    return {
+      action: rule.action === "route" ? `route:${rule.outbound}` : rule.action,
+      sniffed,
+      hijackedDns: false,
+    };
+  }
+  return { action: `route:${config.route.final}`, sniffed, hijackedDns: false };
+}

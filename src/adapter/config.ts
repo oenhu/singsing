@@ -35,6 +35,28 @@ function adaptPathsAndRuntime(config: Json, settings: OpenWrtSettings): void {
   experimental.cache_file = cacheFile;
   config.experimental = experimental;
 
+  // Guard urltest groups where user configured interval > idle_timeout (sing-box requires idle_timeout >= interval)
+  const parseDurationSec = (raw: unknown): number | null => {
+    if (typeof raw !== "string") return null;
+    const m = /^(\d+)(ms|s|m|h)$/.exec(raw.trim());
+    if (!m) return null;
+    const n = Number(m[1]);
+    if (m[2] === "ms") return n / 1000;
+    if (m[2] === "s") return n;
+    if (m[2] === "m") return n * 60;
+    return n * 3600;
+  };
+  if (Array.isArray(config.outbounds)) {
+    for (const out of config.outbounds as Json[]) {
+      if (out.type !== "urltest") continue;
+      const intervalSec = parseDurationSec(out.interval);
+      const idleSec = parseDurationSec(out.idle_timeout);
+      if (intervalSec !== null && idleSec !== null && intervalSec > idleSec) {
+        out.idle_timeout = `${Math.ceil(intervalSec * 2)}s`;
+      }
+    }
+  }
+
   // Normalize relative Tailscale state_directory paths under persistent root
   const tsRoot = settings.paths.tailscaleStateRoot.trim().replace(/\/+$/, "");
   if (Array.isArray(config.endpoints)) {
@@ -73,7 +95,7 @@ export function generateOpenWrtConfig(profile: Profile, settings: OpenWrtSetting
 
   const config = generateConfig(linuxProfile);
 
-  adaptDns(config, settings);
+  adaptDns(config, settings, linuxProfile);
   adaptTun(config, settings);
   adaptRouting(config, settings);
   const ruleSets = adaptRuleSets(config, settings);

@@ -9,10 +9,10 @@ import {
   validateOpenWrt,
   type OpenWrtSettings,
 } from "../src/adapter/index";
-import { blueprintProfile, newNode, newRule, newTailnet } from "../src/upstream/defaults";
+import { blueprintProfile, newGroup, newNode, newRule, newTailnet } from "../src/upstream/defaults";
 import { sampleProfiles } from "./samples";
 import { walk } from "./dnswalk";
-import { routeWalk } from "./routewalk";
+import { preMatchWalk, routeWalk, userspaceWalk } from "./routewalk";
 
 const schema = JSON.parse(
   readFileSync(new URL("./fixtures/sing-box-1.14.3.schema.json", import.meta.url), "utf8"),
@@ -187,9 +187,23 @@ describe("DNS adaptation, LAN leak prevention, and upstream policy preservation"
     const gfwAAAA = walk(config.dns.rules, { domain: "google.com", qtype: "AAAA", mode: "GFWList", gfw: true, publicV6Iface: true });
     expect(gfwAAAA.final).toBe("predefined:NOERROR");
 
-    // Non-CN parallel evaluate (local + speculative remote)
+    // Default Non-CN strategy (remote_verify): gfwlist goes direct to remote, unknown domain evaluates remote only
+    const nonCnGfw = walk(config.dns.rules, { domain: "google.com", qtype: "A", mode: "Non-CN", gfw: true, publicV6Iface: true });
+    expect(nonCnGfw.evaluated).toEqual([]);
+    expect(nonCnGfw.final).toBe("route:remote");
+
     const nonCnA = walk(config.dns.rules, { domain: "example.org", qtype: "A", mode: "Non-CN", publicV6Iface: true });
-    expect(nonCnA.evaluated).toEqual(["local", "remote"]);
+    expect(nonCnA.evaluated).toEqual(["remote"]);
+
+    // Optional Non-CN strategy (race): parallel evaluate local + speculative remote, without ip_is_private poisoning winner
+    const raceCfg = generateOpenWrtConfig(
+      blueprintProfile(),
+      validSettings({ dns: { ...defaultOpenWrtSettings().dns, localServer: "223.5.5.5", nonCnStrategy: "race" } }),
+    ).config as any;
+    expect(validateSchema(raceCfg), JSON.stringify(validateSchema.errors)).toBe(true);
+    const raceNonCnA = walk(raceCfg.dns.rules, { domain: "example.org", qtype: "A", mode: "Non-CN", publicV6Iface: true });
+    expect(raceNonCnA.evaluated).toEqual(["local", "remote"]);
+    expect(raceCfg.dns.rules.some((r: any) => r.match_response === "local-answer" && r.ip_is_private === true)).toBe(false);
   });
 
   it("adds dns-in inbound and prepends dns-in hijack-dns route rule", () => {
@@ -658,7 +672,7 @@ describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces
       tag: "local",
       type: "https",
       server: "dns.alidns.com",
-      domain_resolver: "local-bootstrap",
+      domain_resolver: { server: "local-bootstrap", strategy: "prefer_ipv4" },
     }));
     expect(config.dns.servers).toContainEqual({
       type: "udp",
@@ -730,5 +744,213 @@ describe("P0/P1/P2 OpenWrt gateway enhancements (bypass, ports, QUIC, interfaces
   it("openWrtBlueprintProfile defaults to Non-CN without mutating upstream blueprintProfile", () => {
     expect(openWrtBlueprintProfile().settings.defaultMode).toBe("Non-CN");
     expect(blueprintProfile().settings.defaultMode).toBe("GFWList");
+  });
+
+  it("P0-1: pre-match only emits pure bypass rules so userspace always runs sniff, hijack-dns, and block_quic", () => {
+    const p = blueprintProfile();
+    const usNode = newNode({
+      tag: "US-01",
+      body: JSON.stringify({ type: "vless", server: "us.example.org", server_port: 443, uuid: "00000000-0000-0000-0000-000000000001" }),
+    });
+    p.nodes.push(usNode);
+    p.settings.rules = [newRule({ outbound: usNode.id, lines: ["domain:openai.com", "203.0.113.10"] })];
+    p.settings.proxyRules = ["203.0.113.20"];
+
+    const s = validSettings({
+      tun: { ...defaultOpenWrtSettings().tun, ipv6Mode: "ipv4_only" },
+      routing: { ...defaultOpenWrtRoutingSettings(), blockQuic: true, portMode: "common" },
+      accessControl: {
+        mode: "blocklist",
+        clients: ["192.168.1.50", "aa:bb:cc:dd:ee:ff"],
+        deviceRules: [{ id: "tv", name: "Apple TV", clients: ["192.168.1.88"], outbound: "US-01", enabled: true }],
+      },
+    });
+    const { config, issues } = generateOpenWrtConfig(p, s) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+
+    const sniffIdx = config.route.rules.findIndex((r: any) => r.action === "sniff");
+    expect(sniffIdx).toBeGreaterThan(0);
+    const beforeSniff = config.route.rules.slice(0, sniffIdx);
+    // No action: "route" rule may exist before sniff (would short-circuit sniff & hijack-dns in userspace)
+    expect(beforeSniff.some((r: any) => r.action === "route")).toBe(false);
+    // Every bypass rule before sniff must be pure (no outbound)
+    for (const r of beforeSniff.filter((x: any) => x.action === "bypass")) {
+      expect(r.outbound).toBeUndefined();
+    }
+
+    // Device assigned to US-01: port 53 DNS is NOT bypassed and gets hijacked after sniff
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.88", ip: "8.8.8.8", port: 53, network: "udp", mode: "Non-CN" }),
+    ).toBe("userspace");
+    expect(
+      userspaceWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.88", ip: "8.8.8.8", port: 53, network: "udp", mode: "Non-CN" }),
+    ).toEqual({ action: "hijack-dns", sniffed: true, hijackedDns: true });
+
+    // Device assigned to US-01: external CN IP enters userspace, gets sniffed, then routes to US-01
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.88", ip: "223.5.5.5", cn: true, port: 443, mode: "Non-CN" }),
+    ).toBe("userspace");
+    expect(
+      userspaceWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.88", ip: "223.5.5.5", cn: true, port: 443, mode: "Non-CN" }),
+    ).toEqual({ action: "route:US-01", sniffed: true, hijackedDns: false });
+
+    // Device assigned to US-01 still bypasses LAN directly
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.88", ip: "192.168.1.2", port: 443, mode: "Non-CN" }),
+    ).toBe("bypass");
+
+    // Excluded client (IP & MAC), excluded port, and CN route ALL bypass kernel in pre-match
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.50", ip: "2400:3200::1", cn: true, mode: "Non-CN" }),
+    ).toBe("bypass");
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.99", sourceMac: "aa:bb:cc:dd:ee:ff", ip: "1.1.1.1", mode: "Non-CN" }),
+    ).toBe("bypass");
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", port: 51413, mode: "Non-CN" }),
+    ).toBe("bypass");
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "223.5.5.5", cn: true, port: 443, mode: "Non-CN" }),
+    ).toBe("bypass");
+    // Normal client hitting CN IPv6 under ipv4_only does NOT bypass — falls into pre-sniff IPv6 reject
+    expect(
+      preMatchWalk(config, { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "2400:3200::1", cn: true, port: 443, mode: "Non-CN" }),
+    ).toBe("reject");
+  });
+
+  it("P0-2: applies domain_resolver strategy across default_domain_resolver, outbounds, endpoints, and DoH bootstrap while preserving custom overrides", () => {
+    const p = blueprintProfile();
+    p.nodes.push(
+      newNode({
+        tag: "wg-node",
+        body: JSON.stringify({
+          type: "wireguard",
+          address: ["10.0.0.2/32"],
+          private_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          peers: [{ address: "wg.example.org", port: 51820, public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", allowed_ips: ["0.0.0.0/0"] }],
+        }),
+      }),
+      newNode({
+        tag: "custom-resolver-node",
+        body: JSON.stringify({
+          type: "vless",
+          server: "custom.example.org",
+          server_port: 443,
+          uuid: "00000000-0000-0000-0000-000000000002",
+          domain_resolver: { server: "local", strategy: "ipv6_only" },
+        }),
+      }),
+    );
+
+    const v4Settings = validSettings({
+      dns: {
+        ...defaultOpenWrtSettings().dns,
+        localType: "https",
+        localServer: "dns.alidns.com",
+        localPort: 443,
+        localServerName: "dns.alidns.com",
+        localBootstrap: "223.5.5.5",
+      },
+      tun: { ...defaultOpenWrtSettings().tun, ipv6Mode: "ipv4_only" },
+    });
+    const { config: v4Cfg } = generateOpenWrtConfig(p, v4Settings) as any;
+    expect(validateSchema(v4Cfg), JSON.stringify(validateSchema.errors)).toBe(true);
+    expect(v4Cfg.route.default_domain_resolver).toEqual({ server: "local", strategy: "ipv4_only" });
+    expect(v4Cfg.outbounds.find((o: any) => o.tag === "hy2-1").domain_resolver).toEqual({ server: "local", strategy: "ipv4_only" });
+    expect(v4Cfg.endpoints.find((e: any) => e.tag === "wg-node").domain_resolver).toEqual({ server: "local", strategy: "ipv4_only" });
+    expect(v4Cfg.dns.servers.find((s: any) => s.tag === "local").domain_resolver).toEqual({ server: "local-bootstrap", strategy: "ipv4_only" });
+    // User's custom domain_resolver object is never overwritten
+    expect(v4Cfg.outbounds.find((o: any) => o.tag === "custom-resolver-node").domain_resolver).toEqual({ server: "local", strategy: "ipv6_only" });
+
+    const directCfg = generateOpenWrtConfig(p, validSettings({ tun: { ...defaultOpenWrtSettings().tun, ipv6Mode: "direct" } })).config as any;
+    expect(directCfg.route.default_domain_resolver).toEqual({ server: "local", strategy: "prefer_ipv4" });
+  });
+
+  it("P1-2: derives deduplicated per-outbound detour DNS servers for custom split rules and respects rule precedence", () => {
+    const p = blueprintProfile();
+    const usNode = newNode({
+      tag: "US-01",
+      body: JSON.stringify({ type: "vless", server: "us.example.org", server_port: 443, uuid: "00000000-0000-0000-0000-000000000001" }),
+    });
+    const sgNode = newNode({
+      tag: "SG-01",
+      body: JSON.stringify({ type: "vless", server: "sg.example.org", server_port: 443, uuid: "00000000-0000-0000-0000-000000000002" }),
+    });
+    const usGroup = newGroup({ tag: "US-Group", type: "urltest", members: [usNode.id], interval: "1h" });
+    const tsLan = newTailnet({
+      tag: "ts-lan",
+      endpoint: JSON.stringify({ state_directory: "ts-lan", hostname: "router" }),
+    });
+    const tsExit = newTailnet({
+      tag: "ts-exit",
+      exitNode: "office-gw",
+      endpoint: JSON.stringify({ state_directory: "ts-exit", hostname: "router" }),
+    });
+    p.nodes.push(usNode, sgNode);
+    p.groups.push(usGroup);
+    p.settings.tailnets = [tsLan, tsExit];
+    p.settings.clientSubnet = "1.2.3.0/24";
+    p.settings.rules = [
+      newRule({ outbound: "direct", lines: ["domain:status.openai.com"] }),
+      newRule({ outbound: usGroup.id, lines: ["openai.com"], ruleSets: [{ source: "geosite-openai", content: "domain" }] }),
+      newRule({ outbound: usGroup.id, lines: ["claude.ai"] }),
+      newRule({ outbound: sgNode.id, lines: ["netflix.com"] }),
+      newRule({ outbound: tsLan.id, lines: ["lan.corp.example"] }),
+      newRule({ outbound: tsExit.id, lines: ["exit.corp.example"] }),
+    ];
+
+    const { config, issues } = generateOpenWrtConfig(p, validSettings()) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+
+    // US-Group deduplicated to 1 derived server, SG-01 gets 1, ts-exit gets 1, ts-lan gets 0
+    const derivedServers = config.dns.servers.filter((s: any) => String(s.tag).startsWith("remote-detour-"));
+    expect(derivedServers.map((s: any) => s.detour)).toEqual(["US-Group", "SG-01", "ts-exit"]);
+
+    const usServerTag = derivedServers.find((s: any) => s.detour === "US-Group").tag;
+    const sgServerTag = derivedServers.find((s: any) => s.detour === "SG-01").tag;
+
+    // Earlier direct rule still wins for status.openai.com
+    expect(walk(config.dns.rules, { domain: "status.openai.com", qtype: "A", mode: "Non-CN", ruleDomain: true }).final).toBe("route:local");
+    // openai.com and claude.ai resolve via US-Group's derived DNS server
+    expect(walk(config.dns.rules, { domain: "api.openai.com", qtype: "A", mode: "Non-CN", ruleDomain: true }).final).toBe(`route:${usServerTag}`);
+    expect(walk(config.dns.rules, { domain: "claude.ai", qtype: "A", mode: "Non-CN", ruleDomain: true }).final).toBe(`route:${usServerTag}`);
+    // netflix.com resolves via SG-01's derived DNS server
+    expect(walk(config.dns.rules, { domain: "netflix.com", qtype: "A", mode: "Non-CN", ruleDomain: true }).final).toBe(`route:${sgServerTag}`);
+    // IPv6 carrier drop still applies to derived proxy domains when allowProxyIpv6=false
+    expect(walk(config.dns.rules, { domain: "api.openai.com", qtype: "AAAA", mode: "Non-CN", ruleDomain: true }).final).toBe("predefined:NOERROR");
+    // urltest group with interval=1h automatically bumps idle_timeout >= interval
+    const usGroupOut = config.outbounds.find((o: any) => o.tag === "US-Group");
+    expect(usGroupOut.idle_timeout).toBe("7200s");
+  });
+
+  it("P1-3: supports independent TCP/UDP port kernel bypass and deduplicates geoip-cn when routeExcludeCn is enabled", () => {
+    const s = validSettings({
+      tun: { ...defaultOpenWrtSettings().tun, routeExcludeCn: true },
+      routing: {
+        ...defaultOpenWrtRoutingSettings(),
+        portMode: "common",
+        udpPortMode: "custom",
+        customUdpPorts: "443,3478-3481",
+      },
+    });
+    const { config, issues } = generateOpenWrtConfig(blueprintProfile(), s) as any;
+    expect(issues.filter((i: any) => i.level === "error")).toEqual([]);
+    expect(validateSchema(config), JSON.stringify(validateSchema.errors)).toBe(true);
+
+    const base = { inbound: "tun-in", sourceIp: "192.168.1.20", ip: "1.1.1.1", mode: "Non-CN" as const };
+    // TCP 443 -> proxied, TCP 51413 -> kernel bypass
+    expect(preMatchWalk(config, { ...base, network: "tcp", port: 443 })).toBe("userspace");
+    expect(preMatchWalk(config, { ...base, network: "tcp", port: 51413 })).toBe("bypass");
+    // UDP 3480 (in custom range) -> proxied, UDP 80 (in TCP common, NOT in custom UDP) -> kernel bypass
+    expect(preMatchWalk(config, { ...base, network: "udp", port: 3480 })).toBe("userspace");
+    expect(preMatchWalk(config, { ...base, network: "udp", port: 80 })).toBe("bypass");
+
+    // When routeExcludeCn=true, pre-match bypass no longer duplicates geoip-cn (still bypasses geosite-cn)
+    const sniffIdx = config.route.rules.findIndex((r: any) => r.action === "sniff");
+    const preMatchStr = JSON.stringify(config.route.rules.slice(0, sniffIdx));
+    expect(preMatchStr).not.toContain('"geoip-cn"');
+    expect(preMatchStr).toContain('"geosite-cn"');
   });
 });

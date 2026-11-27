@@ -2,7 +2,7 @@
 
 export * from "./types";
 export * from "./validation";
-export { buildDirectDnsServer, adaptDns } from "./dns";
+export { buildDirectDnsServer, adaptDns, resolveDomainStrategy } from "./dns";
 export { adaptTun } from "./tun";
 export { adaptRuleSets } from "./rulesets";
 export {

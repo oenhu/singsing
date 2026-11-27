@@ -10,6 +10,7 @@ import {
   defaultOpenWrtRoutingSettings,
   type Ipv6Mode,
   type OpenWrtSettings,
+  type RoutingPortMode,
 } from "./types";
 import { parseRoutingPorts } from "./validation";
 
@@ -20,6 +21,15 @@ const FULL_CN_SITE = "geosite-cn";
 
 const and = (rules: Json[], extra: Json = {}): Json => ({ type: "logical", mode: "and", rules, ...extra });
 const or = (rules: Json[], extra: Json = {}): Json => ({ type: "logical", mode: "or", rules, ...extra });
+
+function invertRule(rule: Json): Json {
+  const cloned = structuredClone(rule);
+  if (cloned.invert === true) {
+    delete cloned.invert;
+    return cloned;
+  }
+  return { ...cloned, invert: true };
+}
 
 function isNoPublicV6Condition(item: Json): boolean {
   return (
@@ -134,11 +144,10 @@ function adaptCnSiteRuleSet(config: Json, cnSiteRuleset: string): string {
   return FULL_CN_SITE;
 }
 
-/** Build a sing-box matcher for the configured proxy ports, or null when all ports are proxied. */
-function buildRoutingPortMatch(settings: OpenWrtSettings): Json | null {
-  const routing = settings.routing ?? defaultOpenWrtRoutingSettings();
-  if (routing.portMode === "all") return null;
-  const raw = routing.portMode === "common" ? COMMON_ROUTING_PORTS : routing.customPorts || "";
+/** Build a sing-box matcher for a single port mode ("all" -> null). */
+function buildSinglePortMatch(mode: RoutingPortMode, customPorts: string): Json | null {
+  if (mode === "all") return null;
+  const raw = mode === "common" ? COMMON_ROUTING_PORTS : customPorts || "";
   const { ports, ranges } = parseRoutingPorts(raw);
   const parts: Json[] = [];
   if (ports.length > 0) parts.push({ port: ports });
@@ -147,7 +156,33 @@ function buildRoutingPortMatch(settings: OpenWrtSettings): Json | null {
   return parts.length === 1 ? parts[0] : or(parts);
 }
 
-/** Strip route action/outbound fields from a post-sniff rule to reuse its exact matcher in pre-match. */
+/**
+ * Build a matcher for traffic whose destination port should bypass default proxying.
+ * Supports shared TCP+UDP port filtering (`udpPortMode: "follow"`) as well as independent TCP/UDP modes.
+ */
+function buildBypassPortsMatch(settings: OpenWrtSettings): Json | null {
+  const routing = settings.routing ?? defaultOpenWrtRoutingSettings();
+  const udpMode = routing.udpPortMode ?? "follow";
+
+  if (udpMode === "follow") {
+    const included = buildSinglePortMatch(routing.portMode, routing.customPorts);
+    return included ? invertRule(included) : null;
+  }
+
+  const tcpIncluded = buildSinglePortMatch(routing.portMode, routing.customPorts);
+  const udpIncluded = buildSinglePortMatch(udpMode, routing.customUdpPorts || "");
+  const parts: Json[] = [];
+  if (tcpIncluded) {
+    parts.push(and([{ network: "tcp" }, invertRule(tcpIncluded)]));
+  }
+  if (udpIncluded) {
+    parts.push(and([{ network: "udp" }, invertRule(udpIncluded)]));
+  }
+  if (parts.length === 0) return null;
+  return parts.length === 1 ? parts[0] : or(parts);
+}
+
+/** Strip route action/outbound fields from a rule to reuse its exact matcher. */
 function stripRouteAction(rule: Json): Json {
   const { action: _action, outbound: _outbound, method: _method, no_drop: _noDrop, ...matcher } = rule;
   return structuredClone(matcher);
@@ -159,8 +194,10 @@ function stripRouteAction(rule: Json): Json {
  * 2. Adapt CN public IPv6 reject rule for OpenWrt `ipv6Mode` (`direct` / `auto` / `ipv4_only`).
  * 3. Add Tailscale Exit Node inbound rules (`advertise_exit_node: true`) for DNS hijack and LAN/subnet reachability.
  * 4. Fix post-sniff priority: `ip_is_private -> direct` -> `accessControl` -> `custom-direct` -> `s.rules` -> port filter -> mode rules -> optional proxied QUIC reject.
- * 5. Emit sing-box 1.13+ Linux `auto_redirect` pre-match `action: "bypass"` rules BEFORE `{ action: "sniff" }` so CN/LAN/direct/blocklisted/non-common-port traffic bypasses userspace completely while preserving all 4 Clash modes.
- * 6. Enable native `find_neighbor: true` + `dhcp_lease_files` when MAC selectors are present.
+ * 5. Emit sing-box 1.13+ Linux `auto_redirect` pre-match `action: "bypass"` rules BEFORE `{ action: "sniff" }`.
+ *    STRICTLY emits pure `action: "bypass"` (never `action: "route"` / `"reject"`) using accumulated
+ *    `noBypass` exclusions so normal-path userspace traffic ALWAYS runs `sniff`, `hijack-dns`, and `block_quic`.
+ * 6. Enable native `find_neighbor: true` when MAC selectors are present.
  */
 export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
   const route = config.route as {
@@ -201,6 +238,8 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
   if (sniffIdx < 0) return;
 
   const preSniffExisting = route.rules.slice(0, sniffIdx);
+  const dnsInRules = preSniffExisting.filter((r) => r.inbound === "dns-in" && r.action === "hijack-dns");
+  const preSniffOther = preSniffExisting.filter((r) => !(r.inbound === "dns-in" && r.action === "hijack-dns"));
   const postSniffExisting = route.rules.slice(sniffIdx); // starts with { action: "sniff" }
 
   // 2. Collect Tailscale Exit Node inbound rules (advertise_exit_node: true)
@@ -273,8 +312,7 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
   );
 
   const accessControlPost = buildPostSniffAccessControlRules(settings);
-  const includedPorts = buildRoutingPortMatch(settings);
-  const bypassPortsMatch: Json | null = includedPorts ? { ...includedPorts, invert: true } : null;
+  const bypassPortsMatch = buildBypassPortsMatch(settings);
 
   let insertedPrivateAndAccess = false;
   let insertedPortAndQuic = false;
@@ -283,7 +321,7 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
     // Skip original ip_is_private position; we re-insert it right after LOCAL_DOMAINS (before accessControl & s.rules)
     if (rule === privRule) continue;
 
-    // Insert Tailscale inbound rules right after hijack-dns (or sniff when hijack is off)
+    // Insert Tailscale inbound rules right after sniff
     if (rule.action === "sniff") {
       postSniff.push(rule);
       if (tailscaleInboundRules.length > 0) {
@@ -343,7 +381,10 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
     });
   }
 
-  // 4. Build sing-box 1.13+ Linux auto_redirect pre-match `action: "bypass"` layer
+  // 4. Build sing-box 1.13+ Linux auto_redirect pre-match `action: "bypass"` layer.
+  //    ONLY pure `action: "bypass"` (without outbound) is emitted here; higher-priority proxy/reject/tailnet
+  //    rules are accumulated in `noBypass` and negated on subsequent bypass rules so userspace traffic never
+  //    short-circuits `sniff`, `hijack-dns`, or `block_quic`.
   const preMatch: Json[] = [];
   const enablePreMatchBypass =
     settings.tun.enabled &&
@@ -357,17 +398,16 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
       tunAddresses.push(settings.tun.addressV6.trim());
     }
 
-    const tunMatch = (matcher: Json | null): Json =>
-      matcher ? and([{ inbound: "tun-in" }, matcher]) : { inbound: "tun-in" };
+    const noBypass: Json[] = [];
 
-    /**
-     * Kernel bypass rule for auto_redirect pre-match.
-     * Guards against sockets whose source IP already belongs to the TUN interface (e.g. source-specific IPv6)
-     * and optionally excludes port 53 so DNS hijack still intercepts hardcoded external DNS servers.
-     */
     const pushBypass = (matcher: Json | null, protectPort53 = true): void => {
       const parts: Json[] = [{ inbound: "tun-in" }];
-      if (matcher) parts.push(matcher);
+      if (matcher) parts.push(structuredClone(matcher));
+      if (noBypass.length === 1) {
+        parts.push(invertRule(noBypass[0]));
+      } else if (noBypass.length > 1) {
+        parts.push(or(noBypass.map((m) => structuredClone(m)), { invert: true }));
+      }
       parts.push({ source_ip_cidr: tunAddresses, invert: true });
       if (protectPort53 && settings.dns.hijack) {
         parts.push({ port: 53, invert: true });
@@ -375,22 +415,19 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
       preMatch.push(and(parts, { action: "bypass" }));
     };
 
-    const pushTunRoute = (matcher: Json, outbound: string): void => {
-      preMatch.push({ ...tunMatch(matcher), action: "route", outbound });
-    };
-
-    // 4a. Tailscale outbound routes BEFORE ip_is_private bypass (Tailscale uses 100.64.0.0/10 CGNAT)
+    // 4a. Tailscale outbound routes must not be bypassed by ip_is_private (Tailscale uses 100.64.0.0/10 CGNAT).
     for (const r of tailnetOutboundRules) {
-      pushTunRoute(stripRouteAction(r), String(r.outbound));
+      noBypass.push(stripRouteAction(r));
     }
 
-    // 4b. LAN / private & local domains bypass first (so every device can reach LAN/router directly)
-    pushBypass({ ip_is_private: true }, true);
+    // 4b. LAN / private & local domains bypass first (so every device can reach LAN/router directly).
+    const lanTargets: Json[] = [{ ip_is_private: true }];
     if (localDomainsRule) {
-      pushBypass(stripRouteAction(localDomainsRule), true);
+      lanTargets.push(stripRouteAction(localDomainsRule));
     }
+    pushBypass(lanTargets.length === 1 ? lanTargets[0] : or(lanTargets), true);
 
-    // 4c. Client Access Control (highest priority over user domain rules and mode rules)
+    // 4c. Client Access Control (highest priority over user domain rules and mode rules).
     const ac = settings.accessControl;
     if (ac) {
       for (const dr of ac.deviceRules || []) {
@@ -403,7 +440,7 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
         if (out === "direct") {
           pushBypass(m, false);
         } else {
-          pushTunRoute(m, out);
+          noBypass.push(m);
         }
       }
 
@@ -423,58 +460,68 @@ export function adaptRouting(config: Json, settings: OpenWrtSettings): void {
       pushBypass(stripRouteAction(customDirectRule), true);
     }
 
-    // 4e. Ordered user custom routing rules (direct -> bypass; proxy/node/group -> route; reject -> reject)
+    // 4e. Ordered user custom routing rules (direct -> bypass; proxy/node/group/reject -> exclude from later bypass)
     for (const r of userRouteRules) {
       const matcher = stripRouteAction(r);
-      if (r.action === "reject") {
-        preMatch.push({ ...tunMatch(matcher), action: "reject" });
-      } else if (r.action === "route" && r.outbound === "direct") {
+      if (r.action === "route" && r.outbound === "direct") {
         pushBypass(matcher, true);
-      } else if (r.action === "route" && typeof r.outbound === "string") {
-        pushTunRoute(matcher, r.outbound);
+      } else if (r.action === "reject" || (r.action === "route" && typeof r.outbound === "string")) {
+        noBypass.push(matcher);
       }
     }
 
-    // 4f. Non-proxy destination ports (e.g. BT/PT/P2P high ports when portMode is common/custom) -> bypass
-    if (bypassPortsMatch) {
-      pushBypass(bypassPortsMatch, true);
-    }
+    // 4f & 4g. Non-proxy destination ports + Direct Clash mode share the same `noBypass` snapshot.
+    const portAndDirectTargets: Json[] = [];
+    if (bypassPortsMatch) portAndDirectTargets.push(bypassPortsMatch);
+    portAndDirectTargets.push({ clash_mode: "Direct" });
+    pushBypass(portAndDirectTargets.length === 1 ? portAndDirectTargets[0] : or(portAndDirectTargets), true);
 
-    // 4g. Direct Clash mode -> bypass
-    pushBypass({ clash_mode: "Direct" }, true);
-
-    // 4h. Explicit custom proxy list -> route (prevents CN bypass below from overriding explicit proxy entries)
+    // 4h. Explicit custom proxy list -> prevent CN bypass below from overriding explicit proxy entries.
     if (customProxyRule) {
-      pushTunRoute(stripRouteAction(customProxyRule), "proxy");
+      noBypass.push(stripRouteAction(customProxyRule));
     }
 
-    // 4i. Mainland China kernel bypass (preserves Global mode & GFWList explicit proxy entries)
-    //     - Non-CN mode: bypass CN site (via reverse_mapping), Steam CDN (if enabled), and CN IP.
-    //     - GFWList mode: bypass known CN site & CN IP (excluding gfwlist / telegram-ip); unknown foreign
-    //       IPs still enter sniff so DoH/SNI-based GFWList matching keeps working accurately.
-    const steamDirect =
-      nonCnRule &&
-      JSON.stringify(nonCnRule).includes("steamcontent.com");
+    // Preserve pre-sniff CN IPv6 reject behavior (auto / ipv4_only) for non-excluded devices.
+    for (const r of preSniffOther) {
+      if (r.action === "reject") {
+        noBypass.push(stripRouteAction(r));
+      }
+    }
+
+    // 4i. Mainland China kernel bypass (preserves Global mode & GFWList explicit proxy entries).
+    //     When `routeExcludeCn` is enabled, `geoip-cn` is already bypassed at Layer 1 (route_exclude_address_set).
+    const steamDirect = nonCnRule && JSON.stringify(nonCnRule).includes("steamcontent.com");
+    const includeGeoipCn = settings.tun.routeExcludeCn !== true;
 
     const nonCnTargets: Json[] = [
       { rule_set: cnSiteTag },
-      { rule_set: "geoip-cn" },
+      ...(includeGeoipCn ? [{ rule_set: "geoip-cn" }] : []),
       ...(steamDirect ? [{ domain_suffix: ["steamcontent.com"] }] : []),
     ];
-    pushBypass(and([{ clash_mode: "Non-CN" }, or(nonCnTargets)]), true);
+    const cnBypassBranches: Json[] = [
+      and([
+        { clash_mode: "Non-CN" },
+        nonCnTargets.length === 1 ? nonCnTargets[0] : or(nonCnTargets),
+      ]),
+    ];
 
     const hasGfwRule = postSniffExisting.some(isGfwlistDirectRule);
     if (hasGfwRule) {
-      pushBypass(
+      const gfwCnTargets: Json[] = [
+        { rule_set: cnSiteTag },
+        ...(includeGeoipCn ? [{ rule_set: "geoip-cn" }] : []),
+      ];
+      cnBypassBranches.push(
         and([
           { clash_mode: "GFWList" },
           { rule_set: ["gfwlist", "telegram-ip"], invert: true },
-          or([{ rule_set: cnSiteTag }, { rule_set: "geoip-cn" }]),
+          gfwCnTargets.length === 1 ? gfwCnTargets[0] : or(gfwCnTargets),
         ]),
-        true,
       );
     }
+
+    pushBypass(cnBypassBranches.length === 1 ? cnBypassBranches[0] : or(cnBypassBranches), true);
   }
 
-  route.rules = [...preSniffExisting, ...preMatch, ...postSniff];
+  route.rules = [...dnsInRules, ...preMatch, ...preSniffOther, ...postSniff];
 }

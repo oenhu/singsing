@@ -8,10 +8,26 @@ PROG_MGR="/usr/share/singsing/service-manager.sh"
 SB_CONFIG="/etc/singsing/sing-box.json"
 
 boot() {
-	local auto_start
+	local auto_start enabled boot_delay
 	config_load singsing
 	config_get auto_start main auto_start "1"
-	[ "$auto_start" = "1" ] || return 0
+	config_get enabled main enabled "0"
+	config_get boot_delay main boot_delay "0"
+	[ "$auto_start" = "1" ] && [ "$enabled" = "1" ] || return 0
+	case "$boot_delay" in
+		''|*[!0-9]*) boot_delay=0 ;;
+	esac
+	if [ "$boot_delay" -gt 300 ]; then
+		boot_delay=300
+	fi
+	if [ "$boot_delay" -gt 0 ]; then
+		logger -t singsing -p daemon.info "Delaying boot start by ${boot_delay}s"
+		(
+			sleep "$boot_delay"
+			exec /etc/init.d/singsing start
+		) >/dev/null 2>&1 &
+		return 0
+	fi
 	start "$@"
 }
 

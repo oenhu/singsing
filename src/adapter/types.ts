@@ -1,10 +1,12 @@
 import type { Issue } from "../upstream/generate";
 
 export type DirectDnsType = "udp" | "tcp" | "tls" | "https";
+export type NonCnDnsStrategy = "remote_verify" | "race";
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "panic";
 export type Ipv6Mode = "direct" | "auto" | "ipv4_only";
 export type CnSiteRuleset = "geosite-cn" | "geosite-geolocation-cn";
 export type RoutingPortMode = "all" | "common" | "custom";
+export type UdpPortMode = "follow" | "all" | "common" | "custom";
 
 /** Standard common ports used when `routing.portMode === "common"`. */
 export const COMMON_ROUTING_PORTS =
@@ -35,6 +37,8 @@ export interface OpenWrtDnsSettings {
   dnsmasqManage: boolean;
   /** Allow AAAA/HTTPS/SVCB records on proxied domains (default false: IPv4-only proxy DNS). */
   allowProxyIpv6?: boolean;
+  /** Non-CN unknown-domain DNS strategy: "remote_verify" (anti-pollution, default) or "race" (upstream parallel). */
+  nonCnStrategy?: NonCnDnsStrategy;
 }
 
 export interface OpenWrtTunSettings {
@@ -86,6 +90,10 @@ export interface OpenWrtRoutingSettings {
   portMode: RoutingPortMode;
   /** Comma-separated ports and ranges (e.g. "80,443,8000-8999") when `portMode === "custom"`. */
   customPorts: string;
+  /** Optional UDP destination port filter: "follow" (match portMode), "all", "common", or "custom". */
+  udpPortMode?: UdpPortMode;
+  /** Comma-separated UDP ports and ranges when `udpPortMode === "custom"`. */
+  customUdpPorts?: string;
   /** Reject QUIC (UDP/443) for proxied traffic so clients fall back cleanly to TCP/TLS (domestic QUIC unaffected). */
   blockQuic: boolean;
 }
@@ -157,6 +165,8 @@ export function defaultOpenWrtRoutingSettings(): OpenWrtRoutingSettings {
     cnSiteRuleset: "geosite-cn",
     portMode: "all",
     customPorts: "",
+    udpPortMode: "follow",
+    customUdpPorts: "",
     blockQuic: false,
   };
 }
@@ -184,6 +194,7 @@ export function defaultOpenWrtSettings(): OpenWrtSettings {
       hijack: true,
       dnsmasqManage: true,
       allowProxyIpv6: false,
+      nonCnStrategy: "remote_verify",
     },
     tun: {
       enabled: true,

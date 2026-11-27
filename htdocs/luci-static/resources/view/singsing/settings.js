@@ -57,6 +57,11 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
+		o = s.option(form.Value, 'boot_delay', '开机延时启动（秒）', '路由器开机后延时启动（0 为不延时，最大 300 秒）。无 RTC 电池的路由器建议设 15-30 秒，等待系统对时与 WAN 就绪，且不阻塞系统启动流程。');
+		o.datatype = 'range(0,300)';
+		o.default = '0';
+		o.depends('auto_start', '1');
+
 		o = s.option(form.Flag, 'auto_rollback', '启动失败后恢复原服务', '始终保留上一次有效配置。启用后，应用失败时还会恢复先前正在运行的服务。');
 		o.default = '1';
 		o.rmempty = false;
@@ -212,6 +217,11 @@ return view.extend({
 		o.default = '0';
 		o.rmempty = false;
 
+		o = s.taboption('remote', form.ListValue, 'non_cn_strategy', 'Non-CN 未知域名 DNS 策略', 'geosite-cn 走直连 DNS、gfwlist 走代理 DNS；其余未知域名可选远端校验（防污染、无泄漏）或并行竞速');
+		o.value('remote_verify', '远端校验防污染（推荐：先查代理 DNS，命中 CN IP 或失败再回退直连 DNS）');
+		o.value('race', '并行竞速（兼容上游：同时查直连与代理 DNS，国内 IP 优先响应）');
+		o.default = 'remote_verify';
+
 		// ---------------------------------------------------------------
 		// 3. 透明代理（TUN + Auto Redirect）
 		s = m.section(form.NamedSection, 'tun', 'tun', '透明代理（TUN）');
@@ -308,6 +318,17 @@ return view.extend({
 		o = s.option(form.Value, 'custom_ports', '自定义代理端口', '逗号分隔端口或端口段（例如 80,443,8000-8999）');
 		o.placeholder = '例如 80,443,8000-8999';
 		o.depends('port_mode', 'custom');
+
+		o = s.option(form.ListValue, 'udp_port_mode', 'UDP 代理端口范围（可选分离）', '默认跟随上方代理端口范围；可单独控制 UDP 端口，例如 TCP 代理常用端口、UDP 全放行或仅常用端口（绕过 BT/P2P 高端口 UDP）');
+		o.value('follow', '跟随上方代理端口范围（默认）');
+		o.value('all', '全部 UDP 端口');
+		o.value('common', '仅常用 UDP 端口');
+		o.value('custom', '自定义 UDP 端口 / 端口段');
+		o.default = 'follow';
+
+		o = s.option(form.Value, 'custom_udp_ports', '自定义 UDP 代理端口', '逗号分隔端口或端口段（例如 53,443,3478-3481）');
+		o.placeholder = '例如 53,443,3478-3481';
+		o.depends('udp_port_mode', 'custom');
 
 		o = s.option(form.Flag, 'block_quic', '阻断默认代理的 UDP 443（QUIC）', '拒绝默认分流中走代理的 UDP 443，便于应用回退到 TCP/TLS。直连、设备指定代理和自定义代理规则仍按原规则转发。');
 		o.default = '0';

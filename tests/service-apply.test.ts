@@ -329,4 +329,50 @@ describe("service-manager WAN integration", () => {
     expect(fire({ ACTION: "ifupdate", INTERFACE: "WAN", IFUPDATE_ADDRESSES: "1" }).status).toBe(0);
     expect(read(callLog)).toBe("wan_ifup WAN\nwan_ifup WAN_6\nwan_ifup WAN\n");
   });
+
+  it("init.d boot() supports non-blocking boot_delay, clamps invalid values, and respects auto_start/enabled", () => {
+    const initSrc = readFileSync(new URL("../root/etc/init.d/singsing", import.meta.url), "utf8");
+    const bootLog = join(f.dir, "boot-events");
+    const fakeSelf = join(f.dir, "fake-init-self");
+    const bootRunner = join(f.dir, "test-boot.sh");
+    writeFileSync(fakeSelf, `#!/bin/sh\nprintf 'exec:%s\\n' "$*" >> "${bootLog}"\n`, { mode: 0o700 });
+    const stripped = initSrc
+      .replace(/^#!\/bin\/sh \/etc\/rc\.common\n/, "#!/bin/sh\n")
+      .replace("/etc/init.d/singsing start", `${fakeSelf} start`)
+      .replace(" >/dev/null 2>&1 &", " >/dev/null 2>&1");
+    writeFileSync(
+      bootRunner,
+      [
+        stripped,
+        'config_load() { :; }',
+        'config_get() {',
+        '  case "$2.$3" in',
+        '    main.auto_start) eval "$1=\\"${MOCK_AUTO_START:-1}\\"";;',
+        '    main.enabled) eval "$1=\\"${MOCK_ENABLED:-1}\\"";;',
+        '    main.boot_delay) eval "$1=\\"${MOCK_BOOT_DELAY:-0}\\"";;',
+        '    *) eval "$1=\\"$4\\"";;',
+        '  esac',
+        '}',
+        'sleep() { printf "sleep:%s\\n" "$1" >> "' + bootLog + '"; }',
+        'start() { printf "start\\n" >> "' + bootLog + '"; }',
+        'logger() { :; }',
+        'boot',
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const runBoot = (env: Record<string, string>) => {
+      if (existsSync(bootLog)) unlinkSync(bootLog);
+      const res = spawnSync("sh", [bootRunner], { encoding: "utf8", env: { ...process.env, ...env } });
+      expect(res.status, res.stderr).toBe(0);
+      return existsSync(bootLog) ? read(bootLog) : "";
+    };
+
+    expect(runBoot({ MOCK_AUTO_START: "0", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "15" })).toBe("");
+    expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "0", MOCK_BOOT_DELAY: "15" })).toBe("");
+    expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "0" })).toBe("start\n");
+    expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "25" })).toBe("sleep:25\nexec:start\n");
+    expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "999" })).toBe("sleep:300\nexec:start\n");
+    expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "abc" })).toBe("start\n");
+  });
 });

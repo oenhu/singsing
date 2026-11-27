@@ -1029,19 +1029,26 @@ describe("LuCI OpenWrt gateway settings round trip (P0/P1/P2)", () => {
   it("saves and applies bypass, port filter, QUIC block, IPv6 mode, mixed-in, interface binding, and backup DNS", async () => {
     const h = luci(profile());
     const initial = await h.view("settings");
+    initial.form!.edit("main.boot_delay", "20");
     initial.form!.edit("dns.local_backup_server", "119.29.29.29");
+    initial.form!.edit("dns.non_cn_strategy", "race");
     initial.form!.edit("tun.ipv6_mode", "ipv4_only");
     initial.form!.edit("tun.include_interface", "br-lan");
     initial.form!.edit("tun.default_interface", "pppoe-wan");
     initial.form!.edit("tun.route_exclude_cn", "1");
     initial.form!.edit("routing.port_mode", "common");
+    initial.form!.edit("routing.udp_port_mode", "custom");
+    initial.form!.edit("routing.custom_udp_ports", "443,3478-3481");
     initial.form!.edit("routing.block_quic", "1");
     initial.form!.edit("mixed.enabled", "1");
     initial.form!.edit("mixed.listen_port", "5331");
     await initial.view.handleSaveApply();
 
     const { config } = applied(h);
+    expect(h.committedOption("main", "boot_delay")).toBe("20");
     expect(config.dns.servers).toContainEqual(expect.objectContaining({ tag: "local-backup", server: "119.29.29.29" }));
+    expect(config.dns.rules.some((r: Record<string, unknown>) => r.tag === "local-answer")).toBe(true);
+    expect(config.route.default_domain_resolver).toEqual({ server: "local", strategy: "ipv4_only" });
     expect(config.inbounds).toContainEqual(expect.objectContaining({
       tag: "tun-in",
       include_interface: ["br-lan"],
@@ -1055,6 +1062,7 @@ describe("LuCI OpenWrt gateway settings round trip (P0/P1/P2)", () => {
     expect(config.route.default_interface).toBe("pppoe-wan");
     expect(config.route.auto_detect_interface).toBeUndefined();
     expect(config.route.rules.some((r: Rule) => r.action === "bypass")).toBe(true);
+    expect(JSON.stringify(config.route.rules)).toContain("3478:3481");
     expect(config.route.rules.some((r: Rule) => r.action === "reject" && JSON.stringify(r).includes('"udp"') && JSON.stringify(r).includes("443"))).toBe(true);
   });
 });
