@@ -6,9 +6,10 @@ STOP=10
 
 PROG_MGR="/usr/share/singsing/service-manager.sh"
 SB_CONFIG="/etc/singsing/sing-box.json"
+BOOT_DELAY_TOKEN="/tmp/singsing/boot-delay.token"
 
 boot() {
-	local auto_start enabled boot_delay
+	local auto_start enabled boot_delay delay_token
 	config_load singsing
 	config_get auto_start main auto_start "1"
 	config_get enabled main enabled "0"
@@ -21,9 +22,14 @@ boot() {
 		boot_delay=300
 	fi
 	if [ "$boot_delay" -gt 0 ]; then
+		mkdir -p "$(dirname "$BOOT_DELAY_TOKEN")" 2>/dev/null || true
+		delay_token="$$.$(date +%s 2>/dev/null || echo 0)"
+		printf '%s\n' "$delay_token" > "$BOOT_DELAY_TOKEN"
 		logger -t singsing -p daemon.info "Delaying boot start by ${boot_delay}s"
 		(
 			sleep "$boot_delay"
+			[ "$(cat "$BOOT_DELAY_TOKEN" 2>/dev/null)" = "$delay_token" ] || exit 0
+			rm -f "$BOOT_DELAY_TOKEN"
 			exec /etc/init.d/singsing start
 		) >/dev/null 2>&1 &
 		return 0
@@ -33,6 +39,7 @@ boot() {
 
 start_service() {
 	local enabled bin
+	rm -f "$BOOT_DELAY_TOKEN"
 
 	config_load singsing
 	config_get enabled main enabled "0"
@@ -118,6 +125,7 @@ service_started() {
 }
 
 stop_service() {
+	rm -f "$BOOT_DELAY_TOKEN"
 	"$PROG_MGR" dnsmasq_restore
 	"$PROG_MGR" cron_remove >/dev/null 2>&1 || true
 }

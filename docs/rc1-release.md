@@ -12,6 +12,7 @@ singsing 通过 LuCI 配置 sing-box，复用 singbox-confgen 生成 JSON，并�
 4. **卸载后 `luci.singsing` 仍残留在 `ubus`（运行集成）**：新增 `Package/$(PKG_NAME)/postrm`（25.12 APK 映射为 `post-deinstall`，仅卸载触发、升级不误触），清理 LuCI 缓存并执行 `/etc/init.d/rpcd reload`，卸载后 `luci.singsing` 立即注销且用户配置文件保留。
 5. **动态 WAN 接口检测与热插拔（`0.1.3-r3`）**：移除 `init.d/singsing` 硬编码小写 `wan` trigger，改由 `/etc/hotplug.d/iface/95-singsing` + OpenWrt 原生 `network_find_wan`/`network_find_wan6` 适配任意逻辑 WAN 名称（如 `wan`、`WAN`、`WAN_6`、`fiber_main`），同时响应 `ifup` 及带 `IFUPDATE_ADDRESSES=1`/`IFUPDATE_PREFIXES=1` 的 `ifupdate`（忽略无变更常规续租），并统一用于 `wan_dns` 探测。
 6. **Tailscale Exit Node 通告子网放行规则修复（`0.1.3-r3`）**：当同时启用 `advertise_exit_node: true` 与 `advertise_routes` 时，改用原生逻辑 `and([inbound, or([ip_is_private, ip_cidr])])` 放行局域网与通告子网（避免原单对象 AND 误阻断非私网通告子网或非通告私网），并在 `exit_node_allow_lan_access: false` 时仍独立放行通告子网。
+7. **架构加固与 `boot_delay` 取消令牌修复（`90a2bd1+`）**：Pre-Match 统一收敛为纯 `action: "bypass"` 规则（确保非绕过流量必经 `sniff` / `hijack-dns` / `block_quic`）；Non-CN 默认升级为 `remote_verify` 抗污染 DNS（含 `gfwlist` 防泄漏、`geoip-cn`/`SERVFAIL`/超时回落及 `local-backup` 全路径容灾，保留 `race` 可选）；为自定义规则指定节点/分组自动派生独立 `remote-detour-*` DNS；支持 TCP/UDP 独立目的端口过滤、显式 `domain_resolver.strategy`、`urltest` `idle_timeout` 下限保护与开机延迟 `boot_delay`（补齐 `/tmp/singsing/boot-delay.token` 取消令牌防止延迟窗口内手动启停触发重复/误启动）。
 
 ## 版本更新内容
 
@@ -26,8 +27,8 @@ singsing 通过 LuCI 配置 sing-box，复用 singbox-confgen 生成 JSON，并�
 
 | 附件 | SHA-256 | SDK 与静态校验 | 运行验证 |
 | --- | --- | --- | --- |
-| `luci-app-singsing_0.1.3-r3_all.ipk` | `199ebc7f6b321e6ba0e3a6c91b8c20c16c15341df4079bb2da9172e2a0ace87d` | OpenWrt 24.10.8 正式 SDK，`verify-openwrt-package.sh` 全项及 `data/control` `0/0` 属主通过 | 官方 OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`) QEMU VM 全链路、cron 实触发与禁用尊重、动态 WAN 热插拔、重启自启、卸载清 `ubus` 与升级均通过 |
-| `luci-app-singsing-0.1.3-r3.apk` | `9f40c9e2b6557efe54593ac0df3879b572f2efc992b2599361385e45116c0c24` | OpenWrt 25.12.6 正式 SDK，`verify-openwrt-package.sh` 全项及 `root:root` 属主通过 | 官方 OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`) QEMU VM 与 LibWrt 25.12-SNAPSHOT 真机（含大写 `WAN`/`WAN_6` 真实 PPPoE 重拨、运营商 IPv6 PD 续租、`ifupdate` 热插拔与 `cron` 禁用尊重）均通过 |
+| `luci-app-singsing_0.1.3-r3_all.ipk` | `a7c5590580dede0c78a4e89cc198027276f557500fdf3022febb592668804aa2` | OpenWrt 24.10.8 正式 SDK，`verify-openwrt-package.sh` 全项及 `data/control` `0/0` 属主通过 | 官方 OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`) QEMU VM 全链路、`boot_delay` 取消/自启、cron 实触发与禁用尊重、动态 WAN 热插拔、重启自启、卸载清 `ubus` 与升级均通过 |
+| `luci-app-singsing-0.1.3-r3.apk` | `b6847ac6c387ec2b57d5312165b9c7c5f46e7a550bcb16561555250cb5bec899` | OpenWrt 25.12.6 正式 SDK，`verify-openwrt-package.sh` 全项及 `root:root` 属主通过 | 官方 OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`) QEMU VM 与 LibWrt 25.12-SNAPSHOT 真机（含 `remote_verify` 抗污染、派生 `detour` DNS、TCP/UDP 端口拆分、`boot_delay` 取消/自启、PPPoE 重拨与 IPv6 PD 续租）均通过 |
 
 ## 已知说明与限制
 

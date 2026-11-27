@@ -25,9 +25,9 @@
 
 | 环境 | 安装包（`0.1.3-r3`） | SHA-256 | 验证范围 |
 | --- | --- | --- | --- |
-| OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`) | `luci-app-singsing_0.1.3-r3_all.ipk` | `199ebc7f6b321e6ba0e3a6c91b8c20c16c15341df4079bb2da9172e2a0ace87d` | 正式 SDK 构建、静态包与 `0:0` 属主校验、官方 24.10.8 QEMU VM 新装/启停/重启/规则集 cron 实触发/动态 WAN 热插拔/卸载清理及升级全部通过 |
-| OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`) | `luci-app-singsing-0.1.3-r3.apk` | `9f40c9e2b6557efe54593ac0df3879b572f2efc992b2599361385e45116c0c24` | 正式 SDK 构建、静态包与 `root:root` 属主校验、官方 25.12.6 QEMU VM 新装/启停/重启/规则集 cron 禁用尊重/动态 WAN 热插拔/卸载清理及升级全部通过 |
-| LibWrt 25.12-SNAPSHOT (`r0-96a0ec8`, kernel `6.12.112`, `qualcommax/ipq60xx`) | 同一 `0.1.3-r3` APK | `9f40c9e2b6557efe54593ac0df3879b572f2efc992b2599361385e45116c0c24` | 真机 `0.1.1-r1 → 0.1.3-r3` 升级、`0:0` 属主、大写 `WAN`/`WAN_6` 自动识别与 `wan_dns` 去重、真实 PPPoE 重拨与运营商 IPv6 PD 续租自动重载、`ifupdate` 地址/前缀热插拔与禁用 `cron` 尊重均通过（核心 `sing-box 1.14.4`） |
+| OpenWrt 24.10.8 (`r29233-443ec4032a`, kernel `6.6.144`) | `luci-app-singsing_0.1.3-r3_all.ipk` | `a7c5590580dede0c78a4e89cc198027276f557500fdf3022febb592668804aa2` | 正式 SDK 构建、静态包与 `0:0` 属主校验、官方 24.10.8 QEMU VM 新装/启停/重启/`boot_delay` 取消与自启/规则集 cron 实触发/动态 WAN 热插拔/卸载清理及升级全部通过 |
+| OpenWrt 25.12.6 (`r33311-981c978eff`, kernel `6.12.112`) | `luci-app-singsing-0.1.3-r3.apk` | `b6847ac6c387ec2b57d5312165b9c7c5f46e7a550bcb16561555250cb5bec899` | 正式 SDK 构建、静态包与 `root:root` 属主校验、官方 25.12.6 QEMU VM 新装/启停/重启/`boot_delay` 取消与自启/规则集 cron 禁用尊重/动态 WAN 热插拔/卸载清理及升级全部通过 |
+| LibWrt 25.12-SNAPSHOT (`r0-96a0ec8`, kernel `6.12.112`, `qualcommax/ipq60xx`) | 同一 `0.1.3-r3` APK | `b6847ac6c387ec2b57d5312165b9c7c5f46e7a550bcb16561555250cb5bec899` | 真机升级、`0:0` 属主、大写 `WAN`/`WAN_6` 自动识别与 PPPoE/IPv6 PD 续租重载、`remote_verify` 抗污染与回落、单规则派生 `detour` DNS、TCP/UDP 独立端口拆分、`local_backup_server` 容灾及 `boot_delay` 取消/自启均通过（核心 `sing-box 1.14.4`） |
 
 在路由器上先执行 `sing-box version`。当前验证核心为 **1.14.4**，默认路径是 `/usr/bin/sing-box`。选择对应固件的安装包，并对照 Release 的 `SHA256SUMS` 检查文件。
 
@@ -51,7 +51,7 @@ tar -czf /root/singsing-backup.tgz -C / etc/config/singsing etc/singsing
 /etc/init.d/singsing stop
 ```
 
-- **全新安装默认 UCI（`0.1.3-r3`）**：`tun.strict_route='0'`、`tun.ipv6_mode='direct'`、`tun.mtu='9000'`、`mixed.enabled='0'`、`routing.bypass_cn='1'`、`routing.cn_site_ruleset='geosite-cn'`、`routing.port_mode='all'`、`routing.block_quic='0'`、`main.ruleset_auto_update='0'`、`main.ruleset_update_cron='0 4 * * *'`。
+- **全新安装默认 UCI（`0.1.3-r3`）**：`main.boot_delay='0'`、`dns.non_cn_strategy='remote_verify'`、`tun.strict_route='0'`、`tun.ipv6_mode='direct'`、`tun.mtu='9000'`、`tun.route_exclude_cn='0'`、`mixed.enabled='0'`、`routing.bypass_cn='1'`、`routing.cn_site_ruleset='geosite-cn'`、`routing.port_mode='all'`、`routing.udp_port_mode='follow'`、`routing.block_quic='0'`、`main.ruleset_auto_update='0'`、`main.ruleset_update_cron='0 4 * * *'`。
 - **从 `0.1.1-r1` 升级行为（已实测）**：旧 `/etc/config/singsing`（含原有 `dns.local_server` 与 `tun.strict_route='1'`）及 `/etc/singsing/sing-box.json` 均完整保留；`uci-defaults/99-singsing` 仅按缺失补齐 `mixed` 与 `routing` 段，**不覆盖已有 `tun` 段**，因此旧 UCI 中 `tun.strict_route` 保持 `'1'`，`tun.ipv6_mode` 与 `tun.mtu` 在 UCI 中保持未设置（`<unset>`）；再次通过 LuCI 预览/生成配置时，前端 `api.js` 与适配层会对缺失的 `tun.ipv6_mode` 按 `'direct'`、缺失的 `tun.mtu` 按 `9000` 生成有效配置（`strict_route` 仍沿用旧值 `true`，用户可在设置页按需改为关闭）。
 
 升级后检查活动 Profile、节点及 DNS 设置，预览并应用配置，再从局域网客户端验证 DNS、直连和代理。如果新包无法正常运行，停止服务，重新安装上一个可用包并从备份恢复插件配置，再运行 `sing-box check` 后启动。

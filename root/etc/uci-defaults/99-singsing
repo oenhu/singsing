@@ -17,6 +17,8 @@ if [ -f /etc/config/singsing ]; then
 		uci -q set singsing.routing.cn_site_ruleset='geosite-cn'
 		uci -q set singsing.routing.port_mode='all'
 		uci -q set singsing.routing.custom_ports=''
+		uci -q set singsing.routing.udp_port_mode='follow'
+		uci -q set singsing.routing.custom_udp_ports=''
 		uci -q set singsing.routing.block_quic='0'
 	}
 	uci -q commit singsing 2>/dev/null || true

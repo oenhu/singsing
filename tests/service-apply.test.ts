@@ -338,6 +338,7 @@ describe("service-manager WAN integration", () => {
     writeFileSync(fakeSelf, `#!/bin/sh\nprintf 'exec:%s\\n' "$*" >> "${bootLog}"\n`, { mode: 0o700 });
     const stripped = initSrc
       .replace(/^#!\/bin\/sh \/etc\/rc\.common\n/, "#!/bin/sh\n")
+      .replace('BOOT_DELAY_TOKEN="/tmp/singsing/boot-delay.token"', `BOOT_DELAY_TOKEN="${join(f.dir, "boot-delay.token")}"`)
       .replace("/etc/init.d/singsing start", `${fakeSelf} start`)
       .replace(" >/dev/null 2>&1 &", " >/dev/null 2>&1");
     writeFileSync(
@@ -353,7 +354,7 @@ describe("service-manager WAN integration", () => {
         '    *) eval "$1=\\"$4\\"";;',
         '  esac',
         '}',
-        'sleep() { printf "sleep:%s\\n" "$1" >> "' + bootLog + '"; }',
+        'sleep() { printf "sleep:%s\\n" "$1" >> "' + bootLog + '"; [ "${MOCK_CANCEL_DURING_SLEEP:-0}" = "1" ] && rm -f "$BOOT_DELAY_TOKEN"; }',
         'start() { printf "start\\n" >> "' + bootLog + '"; }',
         'logger() { :; }',
         'boot',
@@ -372,6 +373,7 @@ describe("service-manager WAN integration", () => {
     expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "0", MOCK_BOOT_DELAY: "15" })).toBe("");
     expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "0" })).toBe("start\n");
     expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "25" })).toBe("sleep:25\nexec:start\n");
+    expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "25", MOCK_CANCEL_DURING_SLEEP: "1" })).toBe("sleep:25\n");
     expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "999" })).toBe("sleep:300\nexec:start\n");
     expect(runBoot({ MOCK_AUTO_START: "1", MOCK_ENABLED: "1", MOCK_BOOT_DELAY: "abc" })).toBe("start\n");
   });

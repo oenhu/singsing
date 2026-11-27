@@ -392,4 +392,102 @@ describe.skipIf(process.env.SINGSING_VERIFY_CORE !== "1")("sing-box 1.14.4 binar
       f.dispose();
     }
   });
+
+  it.each(["remote_verify", "race"] as const)(
+    "accepts 90a2bd1 features with nonCnStrategy=%s (derived detour DNS, TCP/UDP port split, pure pre-match bypass, domain_resolver.strategy, urltest idle_timeout guard)",
+    (nonCnStrategy) => {
+      const f = serviceApplyFixture();
+      try {
+        const p = blueprintProfile();
+        const jpNode = newNode({
+          id: "node-jp",
+          tag: "jp-vless",
+          body: JSON.stringify({
+            type: "vless",
+            server: "jp.example",
+            server_port: 443,
+            uuid: "025792b0-4e8e-4b76-a999-4f4ac68be9c1",
+          }),
+        });
+        const usNode = newNode({
+          id: "node-us",
+          tag: "us-vless",
+          body: JSON.stringify({
+            type: "vless",
+            server: "us.example",
+            server_port: 443,
+            uuid: "125792b0-4e8e-4b76-a999-4f4ac68be9c2",
+          }),
+        });
+        p.nodes = [jpNode, usNode];
+        p.groups = [
+          newGroup({
+            id: "grp-auto-jp",
+            tag: "auto-jp",
+            type: "urltest",
+            members: [jpNode.id, usNode.id],
+            interval: "45m",
+          }),
+        ];
+        p.settings.defaultMode = "Non-CN";
+        p.settings.proxyDefault = "auto";
+        p.settings.rules = [
+          newRule({ outbound: jpNode.id, lines: ["domain:streaming-jp.example"] }),
+          newRule({ outbound: "grp-auto-jp", lines: ["domain:ai-app.example"] }),
+          newRule({ outbound: "direct", lines: ["domain:local-direct.example"] }),
+          newRule({ outbound: "reject", lines: ["domain:ads-blocked.example"] }),
+        ];
+
+        const settings = defaultOpenWrtSettings();
+        settings.dns.localServer = "223.5.5.5";
+        settings.dns.localBackupServer = "119.29.29.29";
+        settings.dns.nonCnStrategy = nonCnStrategy;
+        settings.tun.ipv6Mode = nonCnStrategy === "race" ? "ipv4_only" : "direct";
+        settings.tun.routeExcludeCn = true;
+        settings.routing = {
+          bypassCn: true,
+          cnSiteRuleset: "geosite-cn",
+          portMode: "common",
+          customPorts: "",
+          udpPortMode: "custom",
+          customUdpPorts: "53,443,3478-3481",
+          blockQuic: true,
+        };
+        settings.paths.cacheFile = join(f.dir, "cache.db");
+        settings.paths.ruleSetDir = f.dir;
+        settings.paths.tailscaleStateRoot = join(f.dir, "tailscale");
+        settings.accessControl = {
+          mode: "blocklist",
+          clients: ["192.168.21.50"],
+          deviceRules: [
+            { id: "dev-us", name: "AppleTV", clients: ["192.168.21.66"], outbound: "us-vless", enabled: true },
+          ],
+        };
+
+        const generated = generateOpenWrtConfig(p, settings);
+        expect(generated.issues.filter(({ level }) => level === "error")).toEqual([]);
+        const cfg = generated.config as {
+          dns: { servers: Record<string, unknown>[] };
+          outbounds: Record<string, unknown>[];
+          route: { rules: Record<string, unknown>[]; default_domain_resolver: Record<string, unknown> };
+        };
+        expect(cfg.dns.servers.some((s) => String(s.tag).startsWith("remote-detour-") && s.detour === "jp-vless")).toBe(true);
+        expect(cfg.dns.servers.some((s) => String(s.tag).startsWith("remote-detour-") && s.detour === "auto-jp")).toBe(true);
+        expect(cfg.outbounds).toContainEqual(expect.objectContaining({ tag: "auto-jp", idle_timeout: "5400s" }));
+        expect(cfg.route.default_domain_resolver).toEqual({
+          server: "local",
+          strategy: nonCnStrategy === "race" ? "ipv4_only" : "prefer_ipv4",
+        });
+        const sniffIdx = cfg.route.rules.findIndex((r) => r.action === "sniff");
+        const preSniffTun = cfg.route.rules.slice(0, sniffIdx).filter((r) => r.inbound !== "dns-in");
+        expect(preSniffTun.some((r) => r.action === "route")).toBe(false);
+
+        writeLocalRuleSets(f.dir, generated.ruleSets);
+        writeCheckedJSON(f.config, generated.config);
+        expect(() => run("check", "-c", f.config)).not.toThrow();
+      } finally {
+        f.dispose();
+      }
+    },
+  );
 });

@@ -156,3 +156,28 @@ r3 建议用于带已知限制的预发布。RC1 验收时曾记录两项待处�
   - 热插拔精准性：`lan` `ifup` 与无变更的 `WAN_6` `ifupdate` 均保持原 PID（`12430`）不重启；`WAN_6` `ifupdate`（`IFUPDATE_PREFIXES=1`）重载 `12430 → 13116`，`WAN` `ifupdate`（`IFUPDATE_ADDRESSES=1`）重载 `13116 → 13737`。
   - **真实 PPPoE 重拨与运营商 IPv6 PD 续租**：执行 `ifup WAN` 后，`95-singsing` 自动重载 `sing-box`（`13737 → 15125`），随后 `WAN_6` 取得新委派前缀（`2408:8244:210:24b8::/64 → 2408:8244:310:bcb::/64`）并自动完成重载（`15125 → 15988`）；Debian 客户端自动获取新前缀地址 `2408:8244:310:bcb:...`，DNS（`www.baidu.com` `NOERROR`、`router.lan` `NXDOMAIN`）、IPv4 HTTP 与 IPv6 直连 TLS（`2400:3200::1:443`）全部通过。
   - **系统 cron 禁用态尊重与停服还原**：禁用并停止系统 `cron` 后执行 `cron_sync`，保留 `# singsing-ruleset` 计划且不强行开启/拉起 `cron`；停服后 Debian 客户端 `dig @192.168.21.1 www.baidu.com` 恢复 `NOERROR`；还原备份后 4 项基线文件 SHA-256 完全一致。
+
+### 补充验证：`90a2bd1` 架构加固、双官方 VM 与真机实网闭环（2026-11-27）
+
+对远程提交 `90a2bd1`（纯 `action: "bypass"` Pre-Match、Non-CN `remote_verify` 抗污染 DNS、`gfwlist` 防泄漏、单规则派生 `remote-detour-*` DNS、`local_backup_server` 全路径容灾、TCP/UDP 独立端口拆分、`domain_resolver.strategy`、`urltest` `idle_timeout` 防护与 `boot_delay` 开机延迟）完成代码审计、缺陷补修与全套回归：
+
+1. **审计修复项**：
+   - **`boot_delay` 延迟窗口竞态修复**（`root/etc/init.d/singsing`）：原后台子进程仅 `sleep` 后无条件执行 `exec /etc/init.d/singsing start`，若用户在延迟窗口内手动启动/应用/停服/卸载仍会被延迟拉起；已新增 `/tmp/singsing/boot-delay.token` 令牌并在 `start_service()` 与 `stop_service()` 中清除，延迟到期校验不匹配即安全退出。
+   - **升级脚本 UCI 默认键补齐**（`root/etc/uci-defaults/99-singsing`）：升级新建 `routing` 段时同步补齐 `udp_port_mode='follow'` 与 `custom_udp_ports=''`，与 `root/etc/config/singsing` 保持一致。
+   - **自动化与真实核心用例扩充**：在 `tests/service-apply.test.ts` 补充 `boot_delay` 令牌取消单测，在 `tests/sing-box.test.ts` 新增 2 项 `90a2bd1` 真实 `sing-box 1.14.4` 核心 + Schema 校验（`nonCnStrategy=remote_verify` 与 `race`）。
+2. **本地自动化、核心测试与双 SDK 打包**：
+   - `npm run build`、`npm test`（**156/156 通过**）、`npm run test:sing-box`（**15/15 通过**，Linux `sing-box 1.14.4`）与 4 个 shell 脚本 `sh -n` 全部通过。
+   - 两套正式 OpenWrt SDK 构建与 `verify-openwrt-package.sh`（含 `0:0` 属主门禁）通过：
+     - `luci-app-singsing_0.1.3-r3_all.ipk` — SHA-256: `a7c5590580dede0c78a4e89cc198027276f557500fdf3022febb592668804aa2`
+     - `luci-app-singsing-0.1.3-r3.apk` — SHA-256: `b6847ac6c387ec2b57d5312165b9c7c5f46e7a550bcb16561555250cb5bec899`
+3. **双官方 OpenWrt QEMU VM（`armsr/armv8` + `sing-box 1.14.4`）全链路验收**：
+   - **OpenWrt 24.10.8 (`opkg`, `.ipk`)** 与 **OpenWrt 25.12.6 (`apk`, `.apk`)** 均 `EXIT_CODE=0` 全项通过：文件属主 `0:0`、`boot_delay=0` / `non_cn_strategy=remote_verify` / `udp_port_mode=follow` / `route_exclude_cn=0` 默认 UCI、`rpcd` 立即注册、`write_config → start → apply_config`、`singtun` + `table inet sing-box`、`boot_delay=3` 取消令牌中止启动、`boot_delay=2` 异步自动拉起并清理令牌、Clash API `204` 与越权拦截、分片规则集上传、多 Profile CRUD 及卸载后 `postrm` 自动注销 `ubus`。
+4. **LibWrt 25.12-SNAPSHOT 真机（`192.168.21.1`）+ Debian 客户端（`192.168.21.2`）实网闭环验收**：
+   - 部署 `90a2bd1+` APK（`0:0` 属主）并加载 `Non-CN` + `remote_verify` + 派生 `detour` DNS + `port_mode=common` + `udp_port_mode=custom(53,443,19001)` + `block_quic=1` + `mixed-in(:5330)` + `urltest(interval=45m -> idle_timeout=5400s)`：
+     - 国内直连 `www.baidu.com` DNS + HTTP 200（零代理命中），`.lan` 返回 `NXDOMAIN`。
+     - `remote_verify` 抗污染与回落：`google.com`（`gfwlist`）直走 `remote`（`93.184.216.44`）、`polluted-test.example` 返回远程非 CN IP（`93.184.216.77`）；`cn-ip-fallback.example`（远程返回 `223.5.5.5` 命中 `geoip-cn`）与 `fail-remote.example`（远程返回 `SERVFAIL`）均正确回退 `local` 返回 `NXDOMAIN`。
+     - 单规则派生 `detour` DNS：`jp-only.example`（规则目标 `proxy-jp`）DNS 查询实测经 `proxy-jp` 出口解析（返回 `93.184.216.88`，客户端 `AAAA` 被抑制为空），HTTP 经 `singtun` 及 `mixed-in(:5330)` 均命中 `proxy-jp`。
+     - 纯 Pre-Match `action: "bypass"` 与端口拆分：常见端口 TCP 80 命中 `proxy-main`，非常见端口 TCP 28888 在 `sniff` 前直接绕过（零代理命中），代理侧 QUIC（UDP 443）按自定义 UDP 端口进入 `singtun` 后被 `block_quic` 拒断。
+     - `local_backup_server` 容灾：主直连 DNS 置为黑洞 `192.0.2.1`、备用 `223.5.5.5` 时，`www.qq.com` 自动回退解析成功（`153.3.148.154`）；切换 `non_cn_strategy=race` 后国内与境外解析均正常。
+     - 真机 `boot_delay` 闭环：`boot_delay=4` 被 `stop` 取消并清除令牌后保持停服；`boot_delay=2` 非阻塞返回并在 2 秒后自动拉起 `sing-box`、`singtun` 与 `dnsmasq` 接管（`pid=8609`）并清除令牌。
+     - 停服后 Debian `dig @192.168.21.1 www.baidu.com` 恢复 `NOERROR`，路由器原始配置按精确 SHA-256 完整还原。
